@@ -451,11 +451,11 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
 
       {/* Main Review Panel */}
       <div className="flex-1 flex flex-col overflow-hidden">
-        {selected ? (
-          <>
-            {/* Student Header */}
-            <div className="bg-white px-6 py-5 border-b border-slate-200 flex items-center justify-between shrink-0">
-              <div className="flex items-center gap-6">
+        {/* Always-visible header bar */}
+        <div className="bg-white px-6 py-3 border-b border-slate-200 flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-6">
+            {selected ? (
+              <>
                 <div className="w-12 h-12 rounded-2xl bg-primary-100 text-primary-700 flex items-center justify-center text-lg font-bold">
                   {selected.name.charAt(0)}
                 </div>
@@ -467,32 +467,42 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
                     <span>Course: <strong className="text-slate-700">{selected.course || 'Computer Science'}</strong></span>
                   </div>
                 </div>
-              </div>
-              <div className="flex items-center gap-3">
+              </>
+            ) : (
+              <p className="text-slate-400 text-sm">No student selected</p>
+            )}
+          </div>
+          <div className="flex items-center gap-3">
+            {selected && (
+              <>
                 <button onClick={() => setShowAnalytics(true)} className="btn-primary flex items-center gap-1.5 text-xs py-2 px-3">
                   <BarChart3 size={15} /> Analytics
                 </button>
                 <button onClick={() => exportStudentPDF(selected)} className="btn-outline flex items-center gap-1.5 text-xs py-2 px-3">
                   <Download size={15} /> Export
                 </button>
-                <button onClick={() => setShowNotifs(true)} className="relative p-2.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition-colors" title="Notifications">
-                  {officerNotifs.filter(n => !notifRead.includes(n.id)).length > 0 && (
-                    <span className="absolute -top-0.5 -right-0.5 w-4 h-4 bg-rose-500 text-white text-[8px] font-bold rounded-full flex items-center justify-center">
-                      {officerNotifs.filter(n => !notifRead.includes(n.id)).length}
-                    </span>
-                  )}
-                  <Bell size={20} />
-                </button>
-                <button onClick={() => setShowHelp(true)} className="btn-outline flex items-center gap-2 text-sm">
-                  <HelpCircle size={16} />
-                  Help
-                </button>
-                <button onClick={onLogout} className="flex items-center gap-2 text-sm text-slate-500 hover:text-rose-600 transition-colors font-medium">
-                  <LogOut size={18} /> Exit
-                </button>
-              </div>
-            </div>
+              </>
+            )}
+            <button onClick={() => setShowNotifs(true)} className="relative p-2.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition-colors" title="Notifications">
+              {officerNotifs.filter(n => !notifRead.includes(n.id)).length > 0 && (
+                <span className="absolute -top-0.5 -right-0.5 w-4 h-4 bg-rose-500 text-white text-[8px] font-bold rounded-full flex items-center justify-center">
+                  {officerNotifs.filter(n => !notifRead.includes(n.id)).length}
+                </span>
+              )}
+              <Bell size={20} />
+            </button>
+            <button onClick={() => setShowHelp(true)} className="btn-outline flex items-center gap-2 text-sm">
+              <HelpCircle size={16} />
+              Help
+            </button>
+            <button onClick={onLogout} className="flex items-center gap-2 text-sm text-slate-500 hover:text-rose-600 transition-colors font-medium">
+              <LogOut size={18} /> Exit
+            </button>
+          </div>
+        </div>
 
+        {selected ? (
+          <>
             {/* Content Split */}
             <div className="flex-1 flex overflow-hidden">
               {/* Left - Documents */}
