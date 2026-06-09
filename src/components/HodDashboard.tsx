@@ -445,12 +445,12 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
           </div>
           <p className="text-slate-500 mt-1">{sessionSetting} Academic Session &bull; Undergraduate Screening</p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 flex-wrap">
           <div className="relative">
-            <button onClick={() => setShowSessionPicker(!showSessionPicker)} className="btn-outline flex items-center gap-2 text-sm py-2 px-4">
-              <Calendar size={16} />
+            <button onClick={() => setShowSessionPicker(!showSessionPicker)} className="btn-outline flex items-center gap-2 text-sm py-2 px-3">
+              <Calendar size={15} />
               {sessionSetting}
-              <ChevronDown size={14} />
+              <ChevronDown size={13} />
             </button>
             {showSessionPicker && (
               <div className="absolute right-0 mt-2 w-44 bg-white rounded-xl shadow-xl border border-slate-200 overflow-hidden z-50">
@@ -463,27 +463,27 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
               </div>
             )}
           </div>
-          <button onClick={exportReportPDF} className="btn-primary flex items-center gap-2 text-sm py-2 px-4">
-            <Download size={16} /> Export Report
+          <button onClick={exportReportPDF} className="btn-primary flex items-center gap-1.5 text-xs py-2 px-3">
+            <Download size={14} /> <span className="hidden sm:inline">Export</span><span className="sm:hidden">PDF</span>
           </button>
-          <button onClick={() => setShowNotifications(true)} className="relative p-2.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition-colors" title="Notifications">
+          <button onClick={() => setShowNotifications(true)} className="relative p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition-colors" title="Notifications">
             {hodNotifs.filter(n => !markedRead.includes(n.id)).length > 0 && (
               <span className="absolute -top-0.5 -right-0.5 w-4 h-4 bg-rose-500 text-white text-[8px] font-bold rounded-full flex items-center justify-center">
                 {hodNotifs.filter(n => !markedRead.includes(n.id)).length}
               </span>
             )}
-            <Bell size={20} />
+            <Bell size={19} />
           </button>
-          <button onClick={() => setShowHelp(true)} className="btn-outline flex items-center gap-2 text-sm py-2 px-4">
+          <button onClick={() => setShowHelp(true)} className="btn-outline flex items-center gap-2 text-sm py-2 px-3">
             <HelpCircle size={16} />
             Help
           </button>
           <button onClick={() => setShowSettings(true)} className="p-2.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition-colors" title="Settings">
             <Settings size={20} />
           </button>
-          <button onClick={onLogout} className="flex items-center gap-2 text-sm text-slate-500 hover:text-rose-600 transition-colors font-medium">
+          <button onClick={onLogout} className="flex items-center gap-2 text-sm text-slate-500 hover:text-rose-600 transition-colors font-medium p-2 lg:p-0" title="Sign Out">
             <LogOut size={18} />
-            Sign Out
+            <span className="hidden lg:inline">Sign Out</span>
           </button>
         </div>
       </div>
@@ -1169,7 +1169,7 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
 
       {/* Toast */}
       {toast && (
-        <div className="fixed bottom-6 right-6 bg-slate-800 text-white px-5 py-3 rounded-xl shadow-xl z-50 animate-fade-in-up flex items-center gap-3 max-w-sm">
+        <div className="fixed bottom-4 left-4 right-4 sm:left-auto sm:right-6 bg-slate-800 text-white px-5 py-3 rounded-xl shadow-xl z-50 animate-fade-in-up flex items-center gap-3 max-w-sm">
           <span className="text-sm">{toast}</span>
         </div>
       )}

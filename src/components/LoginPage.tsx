@@ -209,7 +209,7 @@ export default function LoginPage({ onLogin, onTerms }: LoginPageProps) {
       </div>
 
       {toast && (
-        <div className="fixed bottom-6 right-6 bg-slate-800 text-white px-5 py-3 rounded-xl shadow-xl z-50 animate-fade-in-up flex items-center gap-3 max-w-sm">
+        <div className="fixed bottom-4 left-4 right-4 sm:left-auto sm:right-6 bg-slate-800 text-white px-5 py-3 rounded-xl shadow-xl z-50 animate-fade-in-up flex items-center gap-3 max-w-sm">
           <span className="text-sm">{toast}</span>
         </div>
       )}

@@ -355,8 +355,8 @@ export default function StudentDashboard({ onLogout }: StudentDashboardProps) {
             &nbsp;&bull;&nbsp; {studentInfo.course} ({studentInfo.admissionType})
           </p>
         </div>
-        <div className="flex items-center gap-3">
-          <button onClick={() => setShowNotifs(true)} className="relative p-2.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition-colors" title="Notifications">
+        <div className="flex items-center gap-1.5 sm:gap-3 flex-wrap">
+          <button onClick={() => setShowNotifs(true)} className="relative p-2 sm:p-2.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition-colors" title="Notifications">
             {studentNotifs.filter(n => !notifRead.includes(n.id)).length > 0 && (
               <span className="absolute -top-0.5 -right-0.5 w-4 h-4 bg-rose-500 text-white text-[8px] font-bold rounded-full flex items-center justify-center">
                 {studentNotifs.filter(n => !notifRead.includes(n.id)).length}
@@ -364,13 +364,13 @@ export default function StudentDashboard({ onLogout }: StudentDashboardProps) {
             )}
             <Bell size={20} />
           </button>
-          <button onClick={() => setShowHelp(true)} className="btn-outline flex items-center gap-2 text-sm">
+          <button onClick={() => setShowHelp(true)} className="btn-outline flex items-center gap-2 text-sm p-2.5 lg:px-4 lg:py-2.5" title="Help">
             <HelpCircle size={16} />
-            Help
+            <span className="hidden lg:inline">Help</span>
           </button>
-          <button onClick={onLogout} className="flex items-center gap-2 text-sm text-slate-500 hover:text-rose-600 transition-colors font-medium">
+          <button onClick={onLogout} className="flex items-center gap-2 text-sm text-slate-500 hover:text-rose-600 transition-colors font-medium p-2.5 lg:px-0" title="Sign Out">
             <LogOut size={18} />
-            Sign Out
+            <span className="hidden lg:inline">Sign Out</span>
           </button>
         </div>
       </div>
@@ -721,7 +721,7 @@ export default function StudentDashboard({ onLogout }: StudentDashboardProps) {
 
       {/* Toast */}
       {toast && (
-        <div className="fixed bottom-6 right-6 bg-slate-800 text-white px-5 py-3 rounded-xl shadow-xl z-50 animate-fade-in-up flex items-center gap-3 max-w-sm">
+        <div className="fixed bottom-4 left-4 right-4 sm:left-auto sm:right-6 bg-slate-800 text-white px-5 py-3 rounded-xl shadow-xl z-50 animate-fade-in-up flex items-center gap-3 max-w-sm">
           <span className="text-sm">{toast}</span>
         </div>
       )}

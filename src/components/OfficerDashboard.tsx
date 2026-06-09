@@ -26,6 +26,7 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
   const [queue, setQueue] = useState<QueueItem[]>([]);
   const [docList, setDocList] = useState<string[]>([]);
   const [selected, setSelected] = useState<QueueItem | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [search, setSearch] = useState('');
   const [activeDoc, setActiveDoc] = useState(0);
   const [filter, setFilter] = useState<string>('all');
@@ -363,13 +364,16 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
     </div>
   ) : (
     <div className="flex h-screen bg-slate-50 overflow-hidden">
-      {/* Sidebar Queue */}
-      <div className="w-80 lg:w-96 bg-white border-r border-slate-200 flex flex-col shrink-0">
+      {/* Sidebar Queue - slide-out drawer on mobile */}
+      <div className={`fixed md:relative inset-y-0 left-0 z-40 w-80 lg:w-96 bg-white border-r border-slate-200 flex flex-col shrink-0 transition-transform duration-300 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0`}>
         {/* Header */}
         <div className="p-5 border-b border-slate-100">
           <div className="flex items-center justify-between mb-4">
             <h2 className="font-bold text-slate-800 text-lg">Clearance Queue</h2>
-            <span className="badge-info text-xs">{queue.length} students</span>
+            <div className="flex items-center gap-2">
+              <span className="badge-info text-xs">{queue.length} students</span>
+              <button onClick={() => setSidebarOpen(false)} className="md:hidden p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition-colors">✕</button>
+            </div>
           </div>
           <div className="relative group">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 transition-colors duration-200 group-focus-within:text-primary-500" size={18} />
@@ -449,11 +453,17 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
         </div>
       </div>
 
+      {/* Mobile sidebar backdrop */}
+      {sidebarOpen && <div className="fixed inset-0 bg-black/30 z-30 md:hidden" onClick={() => setSidebarOpen(false)} />}
+
       {/* Main Review Panel */}
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* Always-visible header bar */}
-        <div className="bg-white px-6 py-3 border-b border-slate-200 flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-6">
+        <div className="bg-white px-4 md:px-6 py-3 border-b border-slate-200 flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-2 md:gap-6">
+            <button onClick={() => setSidebarOpen(true)} className="md:hidden p-2 text-slate-400 hover:text-slate-600 rounded-xl hover:bg-slate-100 transition-colors" title="Open queue">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+            </button>
             {selected ? (
               <>
                 <div className="w-12 h-12 rounded-2xl bg-primary-100 text-primary-700 flex items-center justify-center text-lg font-bold">
@@ -472,14 +482,14 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
               <p className="text-slate-400 text-sm">No student selected</p>
             )}
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
             {selected && (
               <>
                 <button onClick={() => setShowAnalytics(true)} className="btn-primary flex items-center gap-1.5 text-xs py-2 px-3">
-                  <BarChart3 size={15} /> Analytics
+                  <BarChart3 size={15} /> <span className="hidden sm:inline">Analytics</span>
                 </button>
                 <button onClick={() => exportStudentPDF(selected)} className="btn-outline flex items-center gap-1.5 text-xs py-2 px-3">
-                  <Download size={15} /> Export
+                  <Download size={15} /> <span className="hidden sm:inline">Export</span>
                 </button>
               </>
             )}
@@ -491,12 +501,12 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
               )}
               <Bell size={20} />
             </button>
-            <button onClick={() => setShowHelp(true)} className="btn-outline flex items-center gap-2 text-sm">
+            <button onClick={() => setShowHelp(true)} className="btn-outline flex items-center gap-2 text-sm p-2.5 lg:px-4 lg:py-2.5" title="Help">
               <HelpCircle size={16} />
-              Help
+              <span className="hidden lg:inline">Help</span>
             </button>
-            <button onClick={onLogout} className="flex items-center gap-2 text-sm text-slate-500 hover:text-rose-600 transition-colors font-medium">
-              <LogOut size={18} /> Exit
+            <button onClick={onLogout} className="flex items-center gap-2 text-sm text-slate-500 hover:text-rose-600 transition-colors font-medium p-2.5 lg:px-0" title="Exit">
+              <LogOut size={18} /> <span className="hidden lg:inline">Exit</span>
             </button>
           </div>
         </div>
@@ -504,9 +514,9 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
         {selected ? (
           <>
             {/* Content Split */}
-            <div className="flex-1 flex overflow-hidden">
+            <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
               {/* Left - Documents */}
-              <div className="flex-1 bg-white border-r border-slate-200 p-4 overflow-y-auto shrink-0">
+              <div className="flex-1 bg-white lg:border-r border-slate-200 p-4 overflow-y-auto shrink-0">
                 <h3 className="font-semibold text-slate-700 text-xs uppercase tracking-wider mb-4">Uploaded Documents</h3>
                 <div className="space-y-2">
                     {docList.map((doc, idx) => (
@@ -536,7 +546,7 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
               </div>
 
               {/* Right - Actions Panel */}
-              <div className="w-80 bg-white border-l border-slate-200 p-5 overflow-y-auto shrink-0">
+              <div className="w-full lg:w-80 bg-white lg:border-l border-slate-200 p-5 overflow-y-auto shrink-0">
                 <h3 className="font-semibold text-slate-700 text-xs uppercase tracking-wider mb-4">Verification Actions</h3>
 
                 {/* Document Status */}
@@ -871,7 +881,7 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
 
       {/* Toast */}
       {toast && (
-        <div className="fixed bottom-6 right-6 bg-slate-800 text-white px-5 py-3 rounded-xl shadow-xl z-50 animate-fade-in-up flex items-center gap-3 max-w-sm">
+        <div className="fixed bottom-4 left-4 right-4 sm:left-auto sm:right-6 bg-slate-800 text-white px-5 py-3 rounded-xl shadow-xl z-50 animate-fade-in-up flex items-center gap-3 max-w-sm">
           <span className="text-sm">{toast}</span>
         </div>
       )}
