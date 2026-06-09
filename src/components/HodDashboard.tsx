@@ -368,7 +368,10 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
           setImporting(true);
           try {
             const text = await file.text();
-            const { data, errors: parseErrors } = Papa.parse(text, { header: true, skipEmptyLines: true, transformHeader: (h) => h.trim().toLowerCase().replace(/[^a-z0-9]/g, '_') });
+            const clean = text.replace(/^\uFEFF/, '');
+            const firstLine = clean.split('\n')[0] || '';
+            const delimiter = firstLine.includes('\t') ? '\t' : ',';
+            const { data, errors: parseErrors } = Papa.parse(clean, { header: true, skipEmptyLines: true, delimiter, transformHeader: (h) => h.trim().toLowerCase().replace(/[^a-z0-9]/g, '_') });
             if (parseErrors.length) { setToast(`CSV parse error at row ${parseErrors[0].row || '?'}: ${parseErrors[0].message}`); setImporting(false); return; }
             const rows = data as any[];
             if (rows.length === 0) { setToast('CSV file is empty'); setImporting(false); return; }
@@ -384,27 +387,29 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
 
             const errors: string[] = [];
             const mapped = rows.map((r: any, i: number) => {
-              const reg_no = r.reg_no || r.reg || r.registration_no || '';
-              const name = r.name || r.full_name || '';
+              const keys = Object.keys(r);
+              const val = (k: string) => r[k] || '';
+              const reg_no = val(keys.find(k => /^reg_?no$|registration.?no/.test(k)) || '');
+              const name = val(keys.find(k => /^name$|full_name/.test(k)) || '');
               if (!reg_no) errors.push(`Row ${i + 1}: missing registration number`);
               if (!name) errors.push(`Row ${i + 1}: missing name`);
 
-              const rawType = (r.admission_type || r.type || r.admission || '').toUpperCase();
+              const rawType = val(keys.find(k => /admission.?type|^type$/.test(k)) || '').toUpperCase();
               const admission_type = rawType === 'DE' ? 'DE' as const : 'UTME' as const;
               if (rawType && rawType !== 'UTME' && rawType !== 'DE') {
                 errors.push(`Row ${i + 1}: invalid admission type "${rawType}" (use UTME or DE)`);
               }
 
-              const email = r.email || `${reg_no.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase()}@stu.uniabuja.edu.ng`;
+              const email = val(keys.find(k => /^email/.test(k)) || '') || `${reg_no.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase()}@stu.uniabuja.edu.ng`;
 
               return {
                 reg_no,
                 name,
                 email,
                 admission_type,
-                course: r.course || r.course_of_study || '',
-                session: r.session || sessionSetting,
-                jamb_no: r.jamb_no || r.jamb || '',
+                course: val(keys.find(k => /course/.test(k)) || ''),
+                session: val(keys.find(k => /session/.test(k)) || '') || sessionSetting,
+                jamb_no: val(keys.find(k => /jamb/.test(k)) || ''),
               };
             });
 
