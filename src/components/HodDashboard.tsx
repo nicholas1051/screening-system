@@ -44,7 +44,6 @@ interface HodDashboardProps {
 }
 
 export default function HodDashboard({ onLogout }: HodDashboardProps) {
-  const [dateRange] = useState('This Session');
   const [toast, setToast] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
@@ -63,7 +62,9 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
   const [showHelp, setShowHelp] = useState(false);
   const [markedRead, setMarkedRead] = useState<string[]>([]);
   const [hodNotifs, setHodNotifs] = useState(defaultNotifications);
-  const [sessionSetting, setSessionSetting] = useState('2023/2024');
+  const [sessionSetting, setSessionSetting] = useState('2025/2026');
+  const [showSessionPicker, setShowSessionPicker] = useState(false);
+  const sessionOptions = ['2023/2024', '2024/2025', '2025/2026'];
   const [notifEnabled, setNotifEnabled] = useState(true);
   const [exportFormat, setExportFormat] = useState('PDF');
   const [selectedStudent, setSelectedStudent] = useState<any>(null);
@@ -175,7 +176,7 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
     doc.setFontSize(11);
     doc.setFont('helvetica', 'normal');
     doc.text('Department: Computer Science', 10, y); y += 7;
-    doc.text('Session: 2023/2024', 10, y); y += 7;
+    doc.text(`Session: ${sessionSetting}`, 10, y); y += 7;
     doc.text(`Report Date: ${new Date().toLocaleDateString('en-GB')}`, 10, y); y += 7;
 
     y += 5;
@@ -259,7 +260,7 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
     doc.setFontSize(11);
     doc.setFont('helvetica', 'normal');
     doc.text('Department: Computer Science', 10, y); y += 7;
-    doc.text('Session: 2023/2024', 10, y); y += 7;
+    doc.text(`Session: ${sessionSetting}`, 10, y); y += 7;
     doc.text(`Generated: ${new Date().toLocaleString('en-GB')}`, 10, y); y += 12;
 
     doc.setDrawColor(6, 95, 70);
@@ -402,7 +403,7 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
                 email,
                 admission_type,
                 course: r.course || r.course_of_study || '',
-                session: r.session || '2023/2024',
+                session: r.session || sessionSetting,
                 jamb_no: r.jamb_no || r.jamb || '',
               };
             });
@@ -442,14 +443,26 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
             <h1 className="text-2xl lg:text-3xl font-bold text-slate-800">Executive Dashboard</h1>
             <span className="badge-info text-[10px]">Computer Science Dept.</span>
           </div>
-          <p className="text-slate-500 mt-1">2023/2024 Academic Session &bull; Undergraduate Screening</p>
+          <p className="text-slate-500 mt-1">{sessionSetting} Academic Session &bull; Undergraduate Screening</p>
         </div>
         <div className="flex items-center gap-3">
-          <button className="btn-outline flex items-center gap-2 text-sm py-2 px-4">
-            <Calendar size={16} />
-            {dateRange}
-            <ChevronDown size={14} />
-          </button>
+          <div className="relative">
+            <button onClick={() => setShowSessionPicker(!showSessionPicker)} className="btn-outline flex items-center gap-2 text-sm py-2 px-4">
+              <Calendar size={16} />
+              {sessionSetting}
+              <ChevronDown size={14} />
+            </button>
+            {showSessionPicker && (
+              <div className="absolute right-0 mt-2 w-44 bg-white rounded-xl shadow-xl border border-slate-200 overflow-hidden z-50">
+                {sessionOptions.map(s => (
+                  <button key={s} onClick={() => { setSessionSetting(s); setShowSessionPicker(false); }}
+                    className={`w-full px-4 py-2.5 text-sm text-left transition-colors ${sessionSetting === s ? 'bg-primary-50 text-primary-700 font-medium' : 'text-slate-600 hover:bg-slate-50'}`}>
+                    {s} Academic Session
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           <button onClick={exportReportPDF} className="btn-primary flex items-center gap-2 text-sm py-2 px-4">
             <Download size={16} /> Export Report
           </button>
@@ -1113,7 +1126,7 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
               <div>
                 <h4 className="text-sm font-semibold text-slate-700 mb-3">Academic Session</h4>
                 <div className="grid grid-cols-3 gap-2">
-                  {['2022/2023', '2023/2024', '2024/2025'].map(s => (
+                  {['2023/2024', '2024/2025', '2025/2026'].map(s => (
                     <button key={s} onClick={() => setSessionSetting(s)} className={`px-3 py-2.5 rounded-xl text-sm font-medium transition-all ${
                       sessionSetting === s ? 'bg-primary-800 text-white shadow-sm' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
                     }`}>{s}</button>
