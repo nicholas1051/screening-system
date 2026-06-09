@@ -89,8 +89,8 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
       const [notifsRes, officersRes, statsRes, studentsRes, reasonsRes, logsRes] = await Promise.all([
         getNotifications(user.id),
         getOfficers(),
-        getStudentStats(),
-        getStudentsWithDetails(),
+        getStudentStats(sessionSetting),
+        getStudentsWithDetails(sessionSetting),
         getRejectionReasons(),
         getActivityLogs(50),
       ]);
@@ -152,7 +152,7 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
     }
     setLoading(false);
     loadData();
-  }, []);
+  }, [sessionSetting]);
 
   const exportReportPDF = () => {
     const doc = new jsPDF({ unit: 'mm', format: 'a4' });

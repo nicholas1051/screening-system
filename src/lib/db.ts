@@ -179,8 +179,10 @@ export async function bulkCreateStudents(students: {
   return results;
 }
 
-export async function getStudentStats() {
-  const { data: all } = await supabase.from('students').select('status');
+export async function getStudentStats(session?: string) {
+  let query = supabase.from('students').select('status');
+  if (session) query = query.eq('session', session);
+  const { data: all } = await query;
   if (!all) return { total: 0, cleared: 0, pending: 0, queried: 0 };
   return {
     total: all.length,
@@ -190,11 +192,13 @@ export async function getStudentStats() {
   };
 }
 
-export async function getStudentsWithDetails() {
-  const { data } = await supabase
+export async function getStudentsWithDetails(session?: string) {
+  let query = supabase
     .from('students')
     .select('*, student_documents(*, document:documents(*))')
     .order('name');
+  if (session) query = query.eq('session', session);
+  const { data } = await query;
   return data || [];
 }
 
