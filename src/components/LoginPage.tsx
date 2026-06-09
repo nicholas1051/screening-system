@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { GraduationCap, ShieldCheck, BarChart3, ChevronRight, Eye, EyeOff } from 'lucide-react';
-import { signIn, getProfile, lookupStudentEmailByRegNo, resetPassword } from '../lib/db';
+import { signIn, getProfile, lookupStudentEmailByRegNo, resetPassword, changePassword } from '../lib/db';
 import type { Profile } from '../lib/db';
 
 type Role = 'student' | 'officer' | 'hod';
@@ -24,6 +24,10 @@ export default function LoginPage({ onLogin, onTerms }: LoginPageProps) {
   const [mounted, setMounted] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [forceChangePwd, setForceChangePwd] = useState<boolean>(false);
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const pendingProfile = useRef<Profile | null>(null);
 
   useEffect(() => { setMounted(true); }, []);
   useEffect(() => { if (toast) { const t = setTimeout(() => setToast(null), 2500); return () => clearTimeout(t); } }, [toast]);
@@ -67,8 +71,26 @@ export default function LoginPage({ onLogin, onTerms }: LoginPageProps) {
       setSubmitting(false);
       return;
     }
+    if (data.user.user_metadata?.password_change_required) {
+      pendingProfile.current = p;
+      setForceChangePwd(true);
+      setSubmitting(false);
+      return;
+    }
     setSubmitting(false);
     onLogin(p);
+  };
+
+  const handleForceChange = async () => {
+    if (!newPassword || newPassword.length < 6) { setToast('Password must be at least 6 characters'); return; }
+    if (newPassword !== confirmPassword) { setToast('Passwords do not match'); return; }
+    setSubmitting(true);
+    const { error } = await changePassword(newPassword);
+    if (error) { setToast(error.message); setSubmitting(false); return; }
+    setToast('Password changed successfully. Logging in...');
+    setForceChangePwd(false);
+    setSubmitting(false);
+    if (pendingProfile.current) onLogin(pendingProfile.current);
   };
 
   return (
@@ -108,6 +130,32 @@ export default function LoginPage({ onLogin, onTerms }: LoginPageProps) {
             <p className="text-sm text-slate-300 mb-1">Sign in as <span className="font-semibold text-white">{roles.find(r => r.key === selectedRole)?.label}</span></p>
             <p className="text-xs text-slate-400 mb-6">{roles.find(r => r.key === selectedRole)?.desc}</p>
 
+            {forceChangePwd ? (
+              <form onSubmit={(e) => { e.preventDefault(); handleForceChange(); }} className="space-y-4">
+                <div className="p-3 rounded-xl bg-accent-500/10 border border-accent-500/20 text-sm text-accent-300 mb-2">
+                  You must change your password before proceeding.
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-white/80 mb-1.5">New Password</label>
+                  <input type="password" value={newPassword} onChange={e => setNewPassword(e.target.value)}
+                    placeholder="At least 6 characters"
+                    className="w-full px-4 py-3 rounded-xl border border-white/10 bg-black/20 focus:bg-black/30 text-white placeholder:text-slate-400 outline-none transition-all duration-200 focus:border-accent-400 focus:ring-2 focus:ring-accent-400/20"
+                    required autoFocus />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-white/80 mb-1.5">Confirm Password</label>
+                  <input type="password" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)}
+                    placeholder="Repeat new password"
+                    className="w-full px-4 py-3 rounded-xl border border-white/10 bg-black/20 focus:bg-black/30 text-white placeholder:text-slate-400 outline-none transition-all duration-200 focus:border-accent-400 focus:ring-2 focus:ring-accent-400/20"
+                    required />
+                </div>
+                <button type="submit" disabled={submitting}
+                  className="w-full flex items-center justify-center gap-2 py-3 bg-accent-500 hover:bg-accent-600 disabled:bg-accent-500/60 text-white font-semibold rounded-xl transition-all duration-200 shadow-lg shadow-accent-500/25 hover:shadow-accent-500/40 active:scale-[0.97]">
+                  {submitting ? 'Changing password...' : 'Change Password'}
+                  <ChevronRight size={18} />
+                </button>
+              </form>
+            ) : (
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="animate-fade-in-up">
                 <label className="block text-sm font-medium text-white/80 mb-1.5">{selectedRole === 'student' ? 'Reg. No / Email' : 'Email Address'}</label>
@@ -148,6 +196,7 @@ export default function LoginPage({ onLogin, onTerms }: LoginPageProps) {
                 <ChevronRight size={18} />
               </button>
             </form>
+            )}
 
               <p className="text-xs text-slate-400 text-center mt-6 animate-fade-in">
                 By signing in, you agree to the{' '}

@@ -160,6 +160,7 @@ export async function bulkCreateStudents(students: {
       email: s.email,
       password: `stu${Date.now()}`,
       email_confirm: true,
+      user_metadata: { password_change_required: true },
     });
     if (authErr || !auth?.user) { results.errors++; continue; }
     const { error: insertErr } = await supabase.from('students').insert({
@@ -394,4 +395,14 @@ export async function resetPassword(email: string) {
   return supabase.auth.resetPasswordForEmail(email, {
     redirectTo: getPasswordResetUrl(),
   });
+}
+
+export async function changePassword(newPassword: string) {
+  const { data, error } = await supabase.auth.updateUser({ password: newPassword });
+  if (!error && data.user) {
+    await supabase.auth.updateUser({
+      data: { password_change_required: false },
+    });
+  }
+  return { data, error };
 }
