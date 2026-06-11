@@ -152,31 +152,44 @@ export async function bulkCreateStudents(students: {
   session: string;
   jamb_no?: string;
 }[]) {
-  const results = { imported: 0, skipped: 0, errors: 0 };
+  const results = { imported: 0, skipped: 0, errors: 0, firstError: '' };
+  // Pre-fetch all document IDs sorted by sort_order
+  const { data: allDocs } = await supabase.from('documents').select('id').order('sort_order');
+  // First 14 are standard (all students), remaining are DE-specific
+  const standardIds = allDocs?.slice(0, 14).map(d => d.id) || [];
+  const deOnlyIds = allDocs?.slice(14).map(d => d.id) || [];
   for (const s of students) {
-    const { data: existing } = await supabase.from('students').select('id').eq('reg_no', s.reg_no).maybeSingle();
-    if (existing) { results.skipped++; continue; }
-    const { data: auth, error: authErr } = await supabase.auth.admin.createUser({
-      email: s.email,
-      password: `stu${Date.now()}`,
-      email_confirm: true,
-      user_metadata: { password_change_required: true },
-    });
-    if (authErr || !auth?.user) { results.errors++; continue; }
-    const { error: insertErr } = await supabase.from('students').insert({
-      user_id: auth.user.id,
+    const { data: existing } = await supabase.from('students').select('id, email').eq('reg_no', s.reg_no).maybeSingle();
+    if (existing) {
+      if (!existing.email) {
+        await supabase.from('students').update({ email: s.email }).eq('id', existing.id);
+      }
+      results.skipped++;
+      continue;
+    }
+    const { data: inserted, error: insertErr } = await supabase.from('students').insert({
+      user_id: null,
       reg_no: s.reg_no,
       name: s.name,
+      email: s.email,
       admission_type: s.admission_type,
       course: s.course,
       session: s.session,
       jamb_no: s.jamb_no || null,
       status: 'pending',
-    });
-    if (insertErr) { results.errors++; continue; }
+    }).select('id').maybeSingle();
+    if (insertErr || !inserted) { results.errors++; if (!results.firstError) results.firstError = insertErr?.message || 'insert returned no id'; continue; }
+    // Auto-assign documents: standard for all, DE-specific only for DE students
+    const docIds = s.admission_type === 'DE' ? [...standardIds, ...deOnlyIds] : standardIds;
+    if (docIds.length > 0) {
+      const { error: batchErr } = await supabase.from('student_documents').insert(
+        docIds.map(docId => ({ student_id: inserted.id, document_id: docId, status: 'pending' }))
+      );
+      if (batchErr) { results.errors++; if (!results.firstError) results.firstError = batchErr.message; continue; }
+    }
     results.imported++;
   }
-  return results;
+  return { ...results, firstError: results.firstError || undefined };
 }
 
 export async function getStudentStats(session?: string) {
@@ -240,9 +253,19 @@ export async function updateDocumentStatus(
   return supabase.from('student_documents').update({
     status,
     reviewed_by: reviewedBy,
-    reviewed_at: new Date().toISOString(),
     queried_reason: queriedReason || null,
   }).eq('id', docId);
+}
+
+export async function bulkApproveDocuments(
+  studentId: string,
+  reviewedBy: string
+) {
+  return supabase.from('student_documents').update({
+    status: 'verified',
+    reviewed_by: reviewedBy,
+    queried_reason: null,
+  }).eq('student_id', studentId).in('status', ['pending', 'issues']);
 }
 
 export async function uploadDocument(
@@ -260,7 +283,7 @@ export async function uploadDocument(
 
   if (existing) {
     return supabase.from('student_documents')
-      .update({ file_url: fileUrl, uploaded_at: new Date().toISOString(), status: 'pending' })
+      .update({ file_url: fileUrl, status: 'pending' })
       .eq('id', existing.id);
   }
 
@@ -269,7 +292,6 @@ export async function uploadDocument(
     document_id: documentId,
     status: 'pending',
     file_url: fileUrl,
-    uploaded_at: new Date().toISOString(),
   });
 }
 
@@ -321,11 +343,7 @@ export async function logActivity(
   action: string,
   targetStudent: string
 ) {
-  return supabase.from('activity_logs').insert({
-    officer_id: officerId,
-    action,
-    target_student: targetStudent,
-  });
+  return supabase.rpc('log_activity', { p_officer_id: officerId, p_action: action, p_target_student: targetStudent });
 }
 
 // ─── Notifications ──────────────────────────────────
@@ -337,11 +355,11 @@ export async function getNotifications(userId: string) {
 }
 
 export async function markNotifRead(notifId: string) {
-  return supabase.from('notifications').update({ is_read: true }).eq('id', notifId);
+  return supabase.rpc('mark_notif_read', { p_notif_id: notifId });
 }
 
 export async function markAllNotifRead(userId: string) {
-  return supabase.from('notifications').update({ is_read: true }).eq('user_id', userId);
+  return supabase.rpc('mark_all_notif_read', { p_user_id: userId });
 }
 
 export async function createNotification(
@@ -350,11 +368,11 @@ export async function createNotification(
   message: string,
   type = 'info'
 ) {
-  return supabase.from('notifications').insert({
-    user_id: userId,
-    title,
-    message,
-    type,
+  return supabase.rpc('create_notification', {
+    p_user_id: userId,
+    p_title: title,
+    p_message: message,
+    p_type: type,
   });
 }
 
@@ -368,12 +386,12 @@ export async function getOfficers() {
 
 export async function addOfficer(name: string, email: string) {
   const pwd = `temp${Date.now()}`;
-  const { data, error } = await supabase.auth.admin.createUser({
+  const { data, error } = await supabase.auth.signUp({
     email,
     password: pwd,
-    email_confirm: true,
+    options: { data: { role: 'officer' } },
   });
-  if (error || !data.user) return { error };
+  if (error || !data?.user) return { error: error || new Error('User creation failed') };
   return supabase.from('profiles').insert({
     id: data.user.id,
     name,
@@ -387,7 +405,7 @@ export async function toggleOfficerActive(officerId: string, active: boolean) {
 }
 
 export async function removeOfficer(officerId: string) {
-  return supabase.auth.admin.deleteUser(officerId);
+  return supabase.from('profiles').update({ active: false }).eq('id', officerId);
 }
 
 // ─── Password Reset ──────────────────────────────────

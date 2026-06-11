@@ -4,13 +4,14 @@ import Papa from 'papaparse';
 import {
   Users, CheckCircle, Clock, AlertCircle, Download,
   TrendingUp, TrendingDown, FileText, ChevronDown, Calendar,
-  Upload, Bell, Settings, Search, X, Check, ShieldCheck, Trash2, Plus, UserPlus, LogOut, HelpCircle
+  Upload, Bell, Settings, Search, X, Check, ShieldCheck, Trash2, Plus, UserPlus, LogOut, HelpCircle, KeyRound
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import {
   getNotifications, getOfficers, getStudentStats, getStudentsWithDetails,
-  getRejectionReasons, getActivityLogs, bulkCreateStudents,
-  addOfficer, toggleOfficerActive, removeOfficer
+  getRejectionReasons, bulkCreateStudents,
+  addOfficer, toggleOfficerActive, removeOfficer,
+  markNotifRead, markAllNotifRead
 } from '../lib/db';
 
 const kpis = [
@@ -60,7 +61,8 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
   const [showNotifications, setShowNotifications] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
-  const [markedRead, setMarkedRead] = useState<string[]>([]);
+  const [notifRead, setNotifRead] = useState<string[]>([]);
+  const userIdRef = useRef<string | null>(null);
   const [hodNotifs, setHodNotifs] = useState(defaultNotifications);
   const [sessionSetting, setSessionSetting] = useState('2025/2026');
   const [showSessionPicker, setShowSessionPicker] = useState(false);
@@ -75,8 +77,38 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
   const [activityData, setActivityData] = useState<any[]>([]);
   const [weeklyTrend, setWeeklyTrend] = useState<{ label: string; cleared: number; pending: number; queried: number }[]>([]);
   const [importing, setImporting] = useState(false);
+  const [creatingAuth, setCreatingAuth] = useState(false);
   const csvInputRef = useRef<HTMLInputElement>(null);
   const masterInputRef = useRef<HTMLInputElement>(null);
+
+  const createAuthAccounts = async () => {
+    setCreatingAuth(true);
+    try {
+      const { data: missing } = await supabase.from('students').select('id, reg_no, name, email').is('user_id', null);
+      if (!missing || missing.length === 0) {
+        setToast('All students already have auth accounts');
+        setCreatingAuth(false);
+        return;
+      }
+      const res = await fetch('/api/create-student-auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ students: missing })
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text.includes('<!DOCTYPE') ? 'API not available in dev mode. Run: node scripts/create-student-auth.js' : text);
+      }
+      const result = await res.json();
+      setToast(`Created ${result.created} auth account(s), ${result.failed} failed`);
+      const [statsRes, studentsRes] = await Promise.all([getStudentStats(), getStudentsWithDetails()]);
+      setKpiValues(statsRes);
+      setStudentsList(studentsRes);
+    } catch (err: any) {
+      setToast(err.message);
+    }
+    setCreatingAuth(false);
+  };
 
   useEffect(() => {
     if (toast) { const t = setTimeout(() => setToast(null), 2500); return () => clearTimeout(t); }
@@ -84,15 +116,15 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
 
   useEffect(() => {
     async function loadData() {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
-      const [notifsRes, officersRes, statsRes, studentsRes, reasonsRes, logsRes] = await Promise.all([
+      try { const { data: { user } } = await supabase.auth.getUser();
+      if (!user) { setLoading(false); return; }
+      userIdRef.current = user.id;
+      const [notifsRes, officersRes, statsRes, studentsRes, reasonsRes] = await Promise.all([
         getNotifications(user.id),
         getOfficers(),
         getStudentStats(sessionSetting),
         getStudentsWithDetails(sessionSetting),
         getRejectionReasons(),
-        getActivityLogs(50),
       ]);
       if (notifsRes.data && notifsRes.data.length > 0) {
         setHodNotifs(notifsRes.data.map((n: any) => ({
@@ -101,8 +133,9 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
           message: n.message,
           time: timeAgo(n.created_at),
           type: n.type,
-          unread: !n.read,
+          unread: !n.is_read,
         })));
+        setNotifRead(notifsRes.data.filter((n: any) => n.is_read).map((n: any) => n.id));
       }
       if (officersRes.data && officersRes.data.length > 0) {
         setOfficers(officersRes.data.map((o: any) => ({
@@ -117,18 +150,23 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
       setKpiValues(statsRes);
       setStudentsList(studentsRes);
       setRejectionReasons(reasonsRes);
-      setActivityData((logsRes.data || []).map((l: any) => ({
-        user: l.profile?.name || 'Unknown',
-        action: l.action.includes('clear') ? 'Cleared' : l.action.includes('query') ? 'Queried' : 'Approved',
+      // Resolve officer names from raw activity logs (individual try/catch so RPC failure doesn't block other data)
+      let rawLogs: any[] = [];
+      try { const r = await supabase.rpc('get_activity_logs', { p_limit: 50 }); rawLogs = r.data || []; } catch {}
+      const officerIds = [...new Set(rawLogs.map((l: any) => l.officer_id))];
+      const { data: profiles } = officerIds.length > 0 ? await supabase.from('profiles').select('id, name').in('id', officerIds) : { data: [] };
+      const nameMap: Record<string, string> = {};
+      if (profiles) profiles.forEach((p: any) => { nameMap[p.id] = p.name; });
+      setActivityData(rawLogs.map((l: any) => ({
+        user: nameMap[l.officer_id] || 'Unknown',
+        action: l.action,
         target: l.target_student,
         time: timeAgo(l.created_at),
-        type: l.action.includes('clear') || l.action === 'Approved' ? 'approve' : 'query',
+        type: l.action.toLowerCase().includes('approve') || l.action.toLowerCase().includes('clear') || l.action.toLowerCase().includes('upload') ? 'approve' : 'query',
         })));
       // Load weekly trend data (last 7 days of activity)
-      const { data: weekLogs } = await supabase
-        .from('activity_logs')
-        .select('action, created_at')
-        .gte('created_at', new Date(Date.now() - 7 * 86400000).toISOString());
+      let weekLogs: any[] | null = null;
+      try { const r = await supabase.rpc('get_activity_logs', { p_limit: 100 }); weekLogs = r.data; } catch {}
       if (weekLogs) {
         const dayLabels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
         const buckets: Record<string, { cleared: number; pending: number; queried: number }> = {};
@@ -149,9 +187,21 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
         });
         setWeeklyTrend(Object.entries(buckets).map(([label, counts]) => ({ label, ...counts })));
       }
+    } catch (e) { console.error('loadData error:', e); }
+      setLoading(false);
     }
-    setLoading(false);
     loadData();
+    // Poll every 10 seconds
+    const interval = setInterval(loadData, 10000);
+    // Real-time subscription for instant updates
+    const channel = supabase
+      .channel('hod-changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'student_documents' }, loadData)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, loadData)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'notifications' }, loadData)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'activity_logs' }, loadData)
+      .subscribe();
+    return () => { clearInterval(interval); supabase.removeChannel(channel); };
   }, [sessionSetting]);
 
   const exportReportPDF = () => {
@@ -395,8 +445,9 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
               if (!name) errors.push(`Row ${i + 1}: missing name`);
 
               const rawType = val(keys.find(k => /admission.?type|^type$/.test(k)) || '').toUpperCase();
-              const admission_type = rawType === 'DE' ? 'DE' as const : 'UTME' as const;
-              if (rawType && rawType !== 'UTME' && rawType !== 'DE') {
+              const normType = rawType === 'DIRECT ENTRY' ? 'DE' : rawType;
+              const admission_type = normType === 'DE' ? 'DE' as const : 'UTME' as const;
+              if (rawType && normType !== 'UTME' && normType !== 'DE') {
                 errors.push(`Row ${i + 1}: invalid admission type "${rawType}" (use UTME or DE)`);
               }
 
@@ -421,7 +472,29 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
             }
 
             const result = await bulkCreateStudents(mapped);
-            setToast(`Imported ${result.imported}, skipped ${result.skipped}, errors ${result.errors}`);
+            const detail = result.firstError ? ` (${result.firstError})` : '';
+            setToast(`Imported ${result.imported}, skipped ${result.skipped}, errors ${result.errors}${detail}`);
+            // Auto-create auth accounts for newly imported students
+            if (result.imported > 0) {
+              try {
+                const { data: missing } = await supabase.from('students').select('id, reg_no, name, email').is('user_id', null);
+                if (missing && missing.length > 0) {
+                  const authRes = await fetch('/api/create-student-auth', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ students: missing })
+                  });
+                  if (authRes.ok) {
+                    const authResult = await authRes.json();
+                    setToast(`Imported ${result.imported}. Created ${authResult.created} auth account(s).`);
+                  } else {
+                    setToast(`Imported ${result.imported}. Click "Create Student Auth Accounts" to enable logins.`);
+                  }
+                }
+              } catch {
+                setToast(`Imported ${result.imported}. Click "Create Student Auth Accounts" to enable logins.`);
+              }
+            }
             // Refresh data
             const [statsRes, studentsRes] = await Promise.all([getStudentStats(), getStudentsWithDetails()]);
             setKpiValues(statsRes);
@@ -472,9 +545,9 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
             <Download size={14} /> <span className="hidden sm:inline">Export</span><span className="sm:hidden">PDF</span>
           </button>
           <button onClick={() => setShowNotifications(true)} className="relative p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition-colors" title="Notifications">
-            {hodNotifs.filter(n => !markedRead.includes(n.id)).length > 0 && (
+            {hodNotifs.filter(n => !notifRead.includes(n.id)).length > 0 && (
               <span className="absolute -top-0.5 -right-0.5 w-4 h-4 bg-rose-500 text-white text-[8px] font-bold rounded-full flex items-center justify-center">
-                {hodNotifs.filter(n => !markedRead.includes(n.id)).length}
+                {hodNotifs.filter(n => !notifRead.includes(n.id)).length}
               </span>
             )}
             <Bell size={19} />
@@ -486,9 +559,9 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
           <button onClick={() => setShowSettings(true)} className="p-2.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition-colors" title="Settings">
             <Settings size={20} />
           </button>
-          <button onClick={onLogout} className="flex items-center gap-2 text-sm text-slate-500 hover:text-rose-600 transition-colors font-medium p-2 lg:p-0" title="Sign Out">
+          <button onClick={onLogout} className="flex items-center gap-2 text-sm text-slate-500 hover:text-rose-600 transition-colors font-medium p-2 lg:p-0" title="Log Out">
             <LogOut size={18} />
-            <span className="hidden lg:inline">Sign Out</span>
+            <span className="hidden lg:inline">Log Out</span>
           </button>
         </div>
       </div>
@@ -678,6 +751,10 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
               <button onClick={() => csvInputRef.current?.click()} className="w-full flex items-center gap-3 p-3 rounded-xl bg-slate-50 hover:bg-primary-50 hover:text-primary-700 hover:shadow-sm hover:-translate-y-0.5 transition-all duration-200 text-left text-sm font-medium text-slate-700 group/action">
                 <Upload size={18} className="text-primary-600 transition-transform duration-200 group-hover/action:scale-110 group-hover/action:-rotate-6" />
                 Upload Admission List (CSV)
+              </button>
+              <button onClick={createAuthAccounts} disabled={creatingAuth} className="w-full flex items-center gap-3 p-3 rounded-xl bg-slate-50 hover:bg-amber-50 hover:text-amber-700 hover:shadow-sm hover:-translate-y-0.5 transition-all duration-200 text-left text-sm font-medium text-slate-700 group/action disabled:opacity-50">
+                <KeyRound size={18} className="text-amber-600 transition-transform duration-200 group-hover/action:scale-110" />
+                {creatingAuth ? 'Creating Accounts...' : 'Create Student Auth Accounts'}
               </button>
               <button onClick={generateMasterPDF} className="w-full flex items-center gap-3 p-3 rounded-xl bg-slate-50 hover:bg-primary-50 hover:text-primary-700 hover:shadow-sm hover:-translate-y-0.5 transition-all duration-200 text-left text-sm font-medium text-slate-700 group/action">
                 <FileText size={18} className="text-accent-600 transition-transform duration-200 group-hover/action:scale-110 group-hover/action:-rotate-6" />
@@ -1058,15 +1135,15 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
               <div className="flex items-center gap-2.5">
                 <Bell size={18} className="text-primary-600" />
                 <h3 className="font-bold text-slate-800">Notifications</h3>
-                {hodNotifs.filter(n => !markedRead.includes(n.id)).length > 0 && (
+                {hodNotifs.filter(n => !notifRead.includes(n.id)).length > 0 && (
                   <span className="bg-rose-100 text-rose-700 text-[10px] font-bold px-2 py-0.5 rounded-full">
-                    {hodNotifs.filter(n => !markedRead.includes(n.id)).length} new
+                    {hodNotifs.filter(n => !notifRead.includes(n.id)).length} new
                   </span>
                 )}
               </div>
               <div className="flex items-center gap-2">
-                {hodNotifs.filter(n => !markedRead.includes(n.id)).length > 0 && (
-                  <button onClick={() => setMarkedRead(hodNotifs.map(n => n.id))} className="text-[11px] text-primary-600 hover:text-primary-700 font-medium">Mark all read</button>
+                {hodNotifs.filter(n => !notifRead.includes(n.id)).length > 0 && (
+                  <button onClick={async () => { if (userIdRef.current) await markAllNotifRead(userIdRef.current); setNotifRead(hodNotifs.map(n => n.id)); }} className="text-[11px] text-primary-600 hover:text-primary-700 font-medium">Mark all read</button>
                 )}
                 <button onClick={() => setShowNotifications(false)} className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg transition-all">✕</button>
               </div>
@@ -1076,10 +1153,10 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
                 <div className="p-8 text-center text-slate-400 text-sm">No notifications</div>
               ) : (
                 hodNotifs.map((n) => {
-                  const isRead = markedRead.includes(n.id);
+                  const isRead = notifRead.includes(n.id);
                   return (
                     <div key={n.id} className={`px-5 py-3.5 border-b border-slate-50 last:border-0 transition-colors duration-150 hover:bg-slate-50 cursor-pointer ${!isRead ? 'bg-primary-50/40' : ''}`}
-                      onClick={() => { if (!isRead) setMarkedRead([...markedRead, n.id]); }}
+                      onClick={async () => { if (!isRead) { await markNotifRead(n.id); setNotifRead([...notifRead, n.id]); } }}
                     >
                       <div className="flex items-start gap-3">
                         <div className={`w-2 h-2 rounded-full mt-1.5 shrink-0 ${!isRead ? 'bg-primary-500' : 'bg-transparent'}`} />
@@ -1104,7 +1181,7 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
               )}
             </div>
             <div className="px-5 py-3 border-t border-slate-200 flex justify-between items-center shrink-0 bg-slate-50/50">
-              <span className="text-[11px] text-slate-400">{hodNotifs.filter(n => !markedRead.includes(n.id)).length} unread</span>
+              <span className="text-[11px] text-slate-400">{hodNotifs.filter(n => !notifRead.includes(n.id)).length} unread</span>
               <button onClick={() => { setShowNotifications(false); setToast('All notifications cleared'); }} className="text-[11px] text-slate-500 hover:text-slate-700 font-medium">Clear all</button>
             </div>
           </div>

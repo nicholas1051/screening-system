@@ -4,15 +4,26 @@ import {
   X, Eye, LogOut, HelpCircle, FileBadge, Award, Image, Sparkles, Bell
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
+import QRCode from 'qrcode';
 import { supabase } from '../lib/supabase';
-import { getStudentDocuments, getNotifications, uploadDocument, uploadFileToStorage, getPublicUrl, updateStudentPassport } from '../lib/db';
+import { getStudentDocuments, getNotifications, uploadDocument, uploadFileToStorage, getPublicUrl, updateStudentPassport, createNotification, markNotifRead, markAllNotifRead, logActivity } from '../lib/db';
 
 interface Document {
   id: number;
   name: string;
   status: 'approved' | 'pending' | 'queried';
   reason?: string;
+  file_url?: string;
   icon: React.ElementType;
+  created_at?: string;
+  reviewed_at?: string;
+}
+
+interface TimelineEntry {
+  date: string;
+  label: string;
+  docName: string;
+  type: 'upload' | 'approve' | 'query' | 'reupload';
 }
 
 const defaultStudentInfo = {
@@ -57,16 +68,22 @@ export default function StudentDashboard({ onLogout }: StudentDashboardProps) {
   const [showNotifs, setShowNotifs] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [notifRead, setNotifRead] = useState<string[]>([]);
+  const userIdRef = useRef<string | null>(null);
   const [studentNotifs, setStudentNotifs] = useState<{ id: string; title: string; message: string; time: string; type: string }[]>(defaultNotifs);
   const [studentId, setStudentId] = useState<string | null>(null);
   const [fileUrls, setFileUrls] = useState<Record<number, string>>({});
   const uploadDocIdRef = useRef<number | null>(null);
   const [loading, setLoading] = useState(true);
+  const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
+  const [showTimeline, setShowTimeline] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewName, setPreviewName] = useState('');
 
   useEffect(() => {
     async function loadData() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) { return; }
+      userIdRef.current = user.id;
 
       const { data: profile } = await supabase.from('profiles').select('name').eq('id', user.id).single();
       const { data: student } = await supabase.from('students').select('*').eq('user_id', user.id).single();
@@ -108,32 +125,90 @@ export default function StudentDashboard({ onLogout }: StudentDashboardProps) {
           setDocuments(docs.map((d: any, idx: number) => {
             const docName = d.document?.name || `Document ${idx + 1}`;
             if (docName === 'Passport Photograph') passportDocId.current = d.document?.id || idx + 1;
-            if (d.file_url) urls[d.document?.id || idx] = d.file_url;
+            if (d.file_url) urls[d.document?.id || idx + 1] = d.file_url;
             return {
               id: d.document?.id || idx + 1,
               name: docName,
               status: d.status === 'verified' ? 'approved' : d.status === 'issues' ? 'queried' : d.status,
               reason: d.queried_reason || undefined,
+              file_url: d.file_url || undefined,
               icon: nameIcon[docName] || FileText,
+              created_at: d.created_at,
+              reviewed_at: d.reviewed_at,
             };
           }));
           setFileUrls(urls);
+          // Build timeline from document timestamps
+          const entries: TimelineEntry[] = [];
+          docs.forEach((d: any) => {
+            const docName = d.document?.name || 'Document';
+            if (d.created_at) {
+              entries.push({ date: d.created_at, label: 'Uploaded', docName, type: 'upload' });
+            }
+            if (d.uploaded_at && d.uploaded_at !== d.created_at) {
+              entries.push({ date: d.uploaded_at, label: 'Re-uploaded', docName, type: 'reupload' });
+            }
+            if (d.reviewed_at) {
+              entries.push({
+                date: d.reviewed_at,
+                label: d.status === 'verified' ? 'Approved' : d.status === 'issues' ? 'Queried' : 'Reviewed',
+                docName,
+                type: d.status === 'verified' ? 'approve' : 'query',
+              });
+            }
+          });
+          // Also pull from activity_logs
+          const { data: logs } = await supabase
+            .rpc('get_student_activity_logs', { p_student_name: studentInfo.name, p_limit: 50 });
+          if (logs) {
+            logs.forEach((l: any) => {
+              if (!entries.some(e => e.date === l.created_at && e.label === l.action)) {
+                const isApprove = l.action.toLowerCase().includes('approve') || l.action.toLowerCase().includes('approved');
+                const isQuery = l.action.toLowerCase().includes('query') || l.action.toLowerCase().includes('queried');
+                entries.push({
+                  date: l.created_at,
+                  label: l.action,
+                  docName: '',
+                  type: isApprove ? 'approve' : isQuery ? 'query' : 'reupload',
+                });
+              }
+            });
+          }
+          entries.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+          setTimeline(entries);
         }
       }
       // Load notifications
       const { data: notifs } = await getNotifications(user.id);
-      if (notifs && notifs.length > 0) {
-        setStudentNotifs(notifs.map((n: any) => ({
-          id: n.id,
-          title: n.title,
-          message: n.message,
-          time: timeAgo(n.created_at),
-          type: n.type,
-        })));
-      }
+      setStudentNotifs(notifs ? notifs.map((n: any) => ({
+        id: n.id,
+        title: n.title,
+        message: n.message,
+        time: timeAgo(n.created_at),
+        type: n.type,
+        is_read: n.is_read,
+      })) : []);
+      setNotifRead(prev => [...new Set([...prev, ...(notifs ? notifs.filter((n: any) => n.is_read).map((n: any) => n.id) : [])])]);
       setLoading(false);
     }
     loadData();
+    // Poll for status changes every 10 seconds
+    const interval = setInterval(loadData, 10000);
+    // Real-time subscription for instant updates
+    let channel: ReturnType<typeof supabase.channel>;
+    supabase.auth.getUser().then(({ data: { user } }) => {
+      if (!user) return;
+      supabase.from('students').select('id').eq('user_id', user.id).single().then(({ data: student }) => {
+        if (!student) return;
+        channel = supabase
+          .channel('student-doc-changes')
+          .on('postgres_changes', { event: '*', schema: 'public', table: 'student_documents', filter: `student_id=eq.${student.id}` }, loadData)
+          .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'students', filter: `id=eq.${student.id}` }, loadData)
+          .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'notifications', filter: `user_id=eq.${user.id}` }, loadData)
+          .subscribe();
+      });
+    });
+    return () => { clearInterval(interval); if (channel) supabase.removeChannel(channel); };
   }, []);
 
   useEffect(() => {
@@ -152,6 +227,15 @@ export default function StudentDashboard({ onLogout }: StudentDashboardProps) {
     const reader = new FileReader();
     reader.onload = (ev) => setPassportImage(ev.target?.result as string);
     reader.readAsDataURL(file);
+    // Log activity
+    if (userIdRef.current) await logActivity(userIdRef.current, 'Uploaded Passport Photograph', studentInfo.name || 'Unknown');
+    // Notify all officers
+    const { data: officers } = await supabase.from('profiles').select('id').eq('role', 'officer');
+    if (officers) {
+      for (const off of officers) {
+        await createNotification(off.id, 'Document Uploaded', `${studentInfo.name} uploaded Passport Photograph.`, 'info');
+      }
+    }
     setToast('Passport uploaded successfully');
   };
 
@@ -161,173 +245,231 @@ export default function StudentDashboard({ onLogout }: StudentDashboardProps) {
   const isCleared = documents.length > 0 && approvedCount === documents.length && queriedCount === 0;
   const progress = documents.length > 0 ? Math.round((approvedCount / documents.length) * 100) : 0;
 
-  const generatePDF = () => {
+  const generatePDF = async () => {
     setErrorMsg(null);
     if (documents.find(d => d.id === 10)?.status === 'approved' && !passportImage) {
       setErrorMsg('Please upload your passport photograph before generating Form 01.');
       return;
     }
     setGenerating(true);
-    setTimeout(() => {
-      const doc = new jsPDF('p', 'mm', 'a4');
-      const pageW = 210;
-      const margin = 18;
-      const contentW = pageW - margin * 2;
-      const pageH = 297;
-      let y = margin;
-      const primary = [6, 94, 70];
-      const light = [236, 253, 245];
-      const dark = [13, 18, 30];
+    const doc = new jsPDF('p', 'mm', 'a4');
+    const pageW = 210;
+    const margin = 18;
+    const contentW = pageW - margin * 2;
+    const pageH = 297;
+    let y = margin;
+    const primary = [6, 94, 70];
+    const light = [236, 253, 245];
+    const dark = [13, 18, 30];
+    const gold = [212, 175, 55];
 
-      const rect = (x: number, y: number, w: number, h: number, color: number[]) => {
-        doc.setFillColor(color[0], color[1], color[2]);
-        doc.rect(x, y, w, h, 'F');
-      };
-      const text = (txt: string, x: number, y: number, size: number, color: number[], opts?: { align?: string, font?: string }) => {
-        doc.setFont(opts?.font || 'helvetica', 'normal');
-        doc.setFontSize(size);
-        doc.setTextColor(color[0], color[1], color[2]);
-        const align = (opts?.align as 'left' | 'center' | 'right') || 'left';
-        if (align === 'center') { doc.text(txt, x, y, { align: 'center' }); }
-        else if (align === 'right') { doc.text(txt, x, y, { align: 'right' }); }
-        else { doc.text(txt, x, y); }
-      };
+    const rect = (x: number, y: number, w: number, h: number, color: number[]) => {
+      doc.setFillColor(color[0], color[1], color[2]);
+      doc.rect(x, y, w, h, 'F');
+    };
+    const text = (txt: string, x: number, y: number, size: number, color: number[], opts?: { align?: string, font?: string }) => {
+      doc.setFont(opts?.font || 'helvetica', 'normal');
+      doc.setFontSize(size);
+      doc.setTextColor(color[0], color[1], color[2]);
+      const align = (opts?.align as 'left' | 'center' | 'right') || 'left';
+      if (align === 'center') { doc.text(txt, x, y, { align: 'center' }); }
+      else if (align === 'right') { doc.text(txt, x, y, { align: 'right' }); }
+      else { doc.text(txt, x, y); }
+    };
 
-      rect(0, 0, pageW, 32, primary);
-      text('UNIABUJA', pageW / 2, 11, 14, [255, 255, 255], { align: 'center', font: 'bold' });
-      text('University of Abuja — Departmental Student Screening System', pageW / 2, 22, 8, [200, 220, 200], { align: 'center' });
-      text('CLEARANCE CERTIFICATE — FORM 01', pageW / 2, 30, 7, [166, 200, 166], { align: 'center' });
+    // Decorative border
+    doc.setDrawColor(primary[0], primary[1], primary[2]);
+    doc.setLineWidth(0.3);
+    doc.rect(4, 4, pageW - 8, pageH - 8, 'S');
+    doc.setDrawColor(gold[0], gold[1], gold[2]);
+    doc.setLineWidth(0.15);
+    doc.rect(5.5, 5.5, pageW - 11, pageH - 11, 'S');
 
-      y = 44;
-      text('CERTIFICATE OF CLEARANCE', pageW / 2, y, 16, primary, { align: 'center', font: 'bold' });
-      y += 9;
-      text('This is to certify that the underlisted candidate has been duly screened', pageW / 2, y, 8, dark, { align: 'center' });
-      y += 5;
-      text('and all required documents have been verified and approved.', pageW / 2, y, 8, dark, { align: 'center' });
-      y += 10;
+    // Header bar
+    rect(0, 0, pageW, 32, primary);
+    text('UNIABUJA', pageW / 2, 11, 16, [255, 255, 255], { align: 'center', font: 'bold' });
+    text('University of Abuja — Departmental Student Screening System', pageW / 2, 21, 8, [200, 220, 200], { align: 'center' });
+    text('CLEARANCE CERTIFICATE — FORM 01', pageW / 2, 29, 7, [166, 200, 166], { align: 'center' });
 
-      const infoH = passportImage ? 60 : 52;
-      rect(margin, y, contentW, infoH, light);
-      doc.setDrawColor(200, 200, 200);
-      doc.rect(margin, y, contentW, infoH, 'S');
+    y = 42;
+    text('CERTIFICATE OF CLEARANCE', pageW / 2, y, 18, primary, { align: 'center', font: 'bold' });
+    y += 10;
+    text('This is to certify that the underlisted candidate has been duly screened', pageW / 2, y, 8, dark, { align: 'center' });
+    y += 5;
+    text('and all required documents have been verified and approved.', pageW / 2, y, 8, dark, { align: 'center' });
+    y += 10;
 
-      const leftX = margin + 8;
-      const rowH = 8;
-      const fields = [
-        { label: 'Full Name:', value: studentInfo.name },
-        { label: 'Registration No:', value: studentInfo.regNo },
-        { label: 'Course of Study:', value: studentInfo.course },
-        { label: 'Admission Type:', value: studentInfo.admissionType },
-        { label: 'Academic Session:', value: studentInfo.session },
-        { label: 'JAMB Registration No:', value: studentInfo.jambNo },
-      ];
+    // Student info card
+    const infoH = passportImage ? 64 : 50;
+    rect(margin, y, contentW, infoH, light);
+    doc.setDrawColor(primary[0], primary[1], primary[2]);
+    doc.setLineWidth(0.3);
+    doc.rect(margin, y, contentW, infoH, 'S');
 
-      fields.forEach((f, i) => {
-        const rowY = y + 6 + i * rowH;
-        doc.setFont('helvetica', 'bold');
-        doc.setFontSize(8);
-        doc.setTextColor(dark[0], dark[1], dark[2]);
-        doc.text(f.label, leftX, rowY);
-        doc.setFont('helvetica', 'normal');
-        doc.text(':  ' + f.value, leftX + 40, rowY);
-      });
+    const leftX = margin + 8;
+    const rowH = 8;
+    const fields = [
+      { label: 'Full Name:', value: studentInfo.name },
+      { label: 'Registration No:', value: studentInfo.regNo },
+      { label: 'Course of Study:', value: studentInfo.course },
+      { label: 'Admission Type:', value: studentInfo.admissionType },
+      { label: 'Academic Session:', value: studentInfo.session },
+      { label: 'JAMB Registration No:', value: studentInfo.jambNo },
+    ];
 
-      if (passportImage) {
-        const photoX = margin + contentW - 38;
-        const photoY = y + 5;
-        const photoW = 30;
-        const photoH = 36;
-        doc.setDrawColor(primary[0], primary[1], primary[2]);
-        doc.setLineWidth(0.6);
-        doc.rect(photoX, photoY, photoW, photoH, 'S');
-        doc.setFont('helvetica', 'bold');
-        doc.setFontSize(5);
-        doc.setTextColor(primary[0], primary[1], primary[2]);
-        doc.text('PASSPORT', photoX + photoW / 2, photoY + photoH + 3.5, { align: 'center' });
-        try {
-          const imgFormat = passportImage.startsWith('data:image/png') ? 'PNG' : 'JPEG';
-          doc.addImage(passportImage, imgFormat, photoX + 1, photoY + 1, photoW - 2, photoH - 2);
-        } catch (_e) {
-          rect(photoX + 1, photoY + 1, photoW - 2, photoH - 2, [200, 200, 200]);
-          doc.setFont('helvetica', 'italic');
-          doc.setFontSize(5);
-          doc.setTextColor(100, 100, 100);
-          doc.text('photo', photoX + photoW / 2, photoY + photoH / 2 + 1, { align: 'center' });
-        }
-      }
-
-      y += infoH + 10;
-      text('VERIFIED DOCUMENTS', pageW / 2, y, 11, primary, { align: 'center', font: 'bold' });
-      y += 8;
-
-      const approved = documents.filter(d => d.status === 'approved');
-      const col1 = margin;
-      const col2 = margin + contentW * 0.42;
-      const col3 = margin + contentW * 0.76;
-      const rowHTable = 6;
-      const headerH = 7;
-
-      rect(col1, y, contentW, headerH, primary);
+    fields.forEach((f, i) => {
+      const rowY = y + 6 + i * rowH;
       doc.setFont('helvetica', 'bold');
-      doc.setFontSize(7);
-      doc.setTextColor(255, 255, 255);
-      doc.text('S/N', col1 + 6, y + 4.8);
-      doc.text('Document Name', col2, y + 4.8);
-      doc.text('Status', col3, y + 4.8);
-      y += headerH;
-
-      approved.forEach((docItem, i) => {
-        const rowBg = i % 2 === 0 ? [248, 250, 252] : [255, 255, 255];
-        rect(col1, y, contentW, rowHTable, rowBg);
-        doc.setFont('helvetica', 'normal');
-        doc.setFontSize(7);
-        doc.setTextColor(dark[0], dark[1], dark[2]);
-        doc.text(`${i + 1}`, col1 + 6, y + 4);
-        doc.text(docItem.name, col2, y + 4);
-        doc.setTextColor(6, 94, 70);
-        doc.setFont('helvetica', 'bold');
-        doc.text('APPROVED', col3, y + 4);
-        y += rowHTable;
-      });
-
-      y += 6;
-      const summaryH = 16;
-      rect(margin, y, contentW, summaryH, light);
-      doc.setFont('helvetica', 'normal');
       doc.setFontSize(8);
       doc.setTextColor(dark[0], dark[1], dark[2]);
-      doc.text(`Total Documents Submitted: ${documents.length}`, margin + 8, y + 6.5);
-      doc.text(`Total Documents Verified: ${approvedCount}`, margin + 8, y + 13);
+      doc.text(f.label, leftX, rowY);
+      doc.setFont('helvetica', 'normal');
+      doc.text(':  ' + f.value, leftX + 40, rowY);
+    });
 
-      y += summaryH + 16;
-      const footerSpace = 18;
-      if (y + footerSpace > pageH - 10) { y = pageH - 10 - footerSpace; }
-
+    if (passportImage) {
+      const photoX = margin + contentW - 38;
+      const photoY = y + 6;
+      const photoW = 30;
+      const photoH = 38;
       doc.setDrawColor(primary[0], primary[1], primary[2]);
-      doc.setLineWidth(0.4);
-      doc.line(margin + 8, y, margin + 55, y);
+      doc.setLineWidth(0.6);
+      doc.rect(photoX, photoY, photoW, photoH, 'S');
       doc.setFont('helvetica', 'bold');
+      doc.setFontSize(5);
+      doc.setTextColor(primary[0], primary[1], primary[2]);
+      doc.text('PASSPORT', photoX + photoW / 2, photoY + photoH + 3.5, { align: 'center' });
+      try {
+        const imgFormat = passportImage.startsWith('data:image/png') ? 'PNG' : 'JPEG';
+        doc.addImage(passportImage, imgFormat, photoX + 1, photoY + 1, photoW - 2, photoH - 2);
+      } catch (_e) {
+        rect(photoX + 1, photoY + 1, photoW - 2, photoH - 2, [200, 200, 200]);
+        doc.setFont('helvetica', 'italic');
+        doc.setFontSize(5);
+        doc.setTextColor(100, 100, 100);
+        doc.text('photo', photoX + photoW / 2, photoY + photoH / 2 + 1, { align: 'center' });
+      }
+    }
+
+    y += infoH + 10;
+    text('VERIFIED DOCUMENTS', pageW / 2, y, 12, primary, { align: 'center', font: 'bold' });
+    y += 9;
+
+    const approved = documents.filter(d => d.status === 'approved');
+    const col1 = margin;
+    const col2 = margin + contentW * 0.42;
+    const col3 = margin + contentW * 0.76;
+    const rowHTable = 6;
+    const headerH = 7;
+
+    rect(col1, y, contentW, headerH, primary);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7);
+    doc.setTextColor(255, 255, 255);
+    doc.text('S/N', col1 + 6, y + 4.8);
+    doc.text('Document Name', col2, y + 4.8);
+    doc.text('Status', col3, y + 4.8);
+    y += headerH;
+
+    approved.forEach((docItem, i) => {
+      const rowBg = i % 2 === 0 ? [248, 250, 252] : [255, 255, 255];
+      rect(col1, y, contentW, rowHTable, rowBg);
+      doc.setFont('helvetica', 'normal');
       doc.setFontSize(7);
       doc.setTextColor(dark[0], dark[1], dark[2]);
-      doc.text('Head of Department Signature', margin + 8, y + 4.5);
+      doc.text(`${i + 1}`, col1 + 6, y + 4);
+      doc.text(docItem.name, col2, y + 4);
+      doc.setTextColor(6, 94, 70);
+      doc.setFont('helvetica', 'bold');
+      doc.text('APPROVED', col3, y + 4);
+      y += rowHTable;
+    });
 
-      doc.setDrawColor(primary[0], primary[1], primary[2]);
-      doc.line(pageW - margin - 8, y, pageW - margin - 55, y);
-      doc.text('Departmental Stamp', pageW - margin - 8, y + 4.5, { align: 'right' });
+    y += 6;
+    const summaryH = 16;
+    rect(margin, y, contentW, summaryH, light);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8);
+    doc.setTextColor(dark[0], dark[1], dark[2]);
+    doc.text(`Total Documents Submitted: ${documents.length}`, margin + 8, y + 6.5);
+    doc.text(`Total Documents Verified: ${approvedCount}`, margin + 8, y + 13);
 
-      y += 14;
+    y += summaryH + 14;
+
+    // HOD signature area (more prominent)
+    const sigBoxH = 22;
+    doc.setDrawColor(primary[0], primary[1], primary[2]);
+    doc.setLineWidth(0.15);
+    doc.rect(margin, y, contentW, sigBoxH, 'S');
+    rect(margin, y, contentW, 6, [240, 248, 240]);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7);
+    doc.setTextColor(primary[0], primary[1], primary[2]);
+    doc.text('HOD VERIFICATION', pageW / 2, y + 4.2, { align: 'center' });
+
+    const sigY = y + 10;
+    doc.setDrawColor(primary[0], primary[1], primary[2]);
+    doc.setLineWidth(0.5);
+    doc.line(margin + 10, sigY, margin + 55, sigY);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7);
+    doc.setTextColor(dark[0], dark[1], dark[2]);
+    doc.text('Head of Department Signature', margin + 10, sigY + 4.5);
+
+    doc.setDrawColor(primary[0], primary[1], primary[2]);
+    doc.setLineWidth(0.5);
+    doc.line(pageW - margin - 10, sigY, pageW - margin - 55, sigY);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7);
+    doc.setTextColor(dark[0], dark[1], dark[2]);
+    doc.text('Departmental Stamp', pageW - margin - 10, sigY + 4.5, { align: 'right' });
+
+    y += sigBoxH + 10;
+
+    // Footer
+    doc.setFont('helvetica', 'italic');
+    doc.setFontSize(6);
+    doc.setTextColor(150, 150, 150);
+    text('This certificate is auto-generated by the UniAbuja Screening System.', pageW / 2, y, 6, [150, 150, 150], { align: 'center' });
+    y += 3.5;
+    text('For verification, scan the QR code below or visit https://screening.uniabuja.edu.ng/verify', pageW / 2, y, 6, [150, 150, 150], { align: 'center' });
+    y += 3.5;
+    text(`Generated on: ${new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}`, pageW / 2, y, 6, [150, 150, 150], { align: 'center' });
+    y += 3.5;
+    text('Ref: FRM-01-UNIABUJA-2024', pageW / 2, y, 6, [150, 150, 150], { align: 'center' });
+
+    // QR Code
+    y += 6;
+    const qrData = JSON.stringify({
+      name: studentInfo.name,
+      regNo: studentInfo.regNo,
+      course: studentInfo.course,
+      session: studentInfo.session,
+      cleared: new Date().toISOString(),
+      ver: '1.0',
+    });
+    try {
+      const qrDataUrl = await QRCode.toDataURL(qrData, {
+        width: 200,
+        margin: 1,
+        color: { dark: '#065e46', light: '#ffffff' },
+      });
+      const qrSize = 22;
+      const qrX = pageW / 2 - qrSize / 2;
+      const qrY = y;
+      doc.addImage(qrDataUrl, 'PNG', qrX, qrY, qrSize, qrSize);
       doc.setFont('helvetica', 'italic');
-      doc.setFontSize(6);
+      doc.setFontSize(5);
       doc.setTextColor(150, 150, 150);
-      text('This certificate is auto-generated by the UniAbuja Screening System. No signature required for digital verification.', pageW / 2, y, 6, [150, 150, 150], { align: 'center' });
-      y += 3.5;
-      text(`Generated on: ${new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}`, pageW / 2, y, 6, [150, 150, 150], { align: 'center' });
-      y += 3.5;
-      text('Ref: FRM-01-UNIABUJA-2024', pageW / 2, y, 6, [150, 150, 150], { align: 'center' });
+      doc.text('Scan for verification', pageW / 2, qrY + qrSize + 4, { align: 'center' });
+    } catch (_e) {
+      // QR generation failed — skip silently
+    }
 
-      doc.save(`UniAbuja_Form01_${studentInfo.regNo.replace(/\//g, '-')}.pdf`);
-      setGenerating(false);
-    }, 800);
+    const safeName = studentInfo.name.replace(/[^a-zA-Z0-9-]/g, '_');
+    const safeRegNo = studentInfo.regNo.replace(/\//g, '-');
+    doc.save(`Form01_${safeName}_${safeRegNo}.pdf`);
+    setGenerating(false);
   };
 
   return loading ? (
@@ -368,9 +510,9 @@ export default function StudentDashboard({ onLogout }: StudentDashboardProps) {
             <HelpCircle size={16} />
             <span className="hidden lg:inline">Help</span>
           </button>
-          <button onClick={onLogout} className="flex items-center gap-2 text-sm text-slate-500 hover:text-rose-600 transition-colors font-medium p-2.5 lg:px-0" title="Sign Out">
+          <button onClick={onLogout} className="flex items-center gap-2 text-sm text-slate-500 hover:text-rose-600 transition-colors font-medium p-2.5 lg:px-0" title="Log Out">
             <LogOut size={18} />
-            <span className="hidden lg:inline">Sign Out</span>
+            <span className="hidden lg:inline">Log Out</span>
           </button>
         </div>
       </div>
@@ -459,6 +601,44 @@ export default function StudentDashboard({ onLogout }: StudentDashboardProps) {
           </button>
         </div>
       )}
+
+      {/* Activity Timeline */}
+      <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+        <button onClick={() => setShowTimeline(!showTimeline)} className="w-full flex items-center justify-between px-5 py-3.5 hover:bg-slate-50 transition-colors">
+          <div className="flex items-center gap-2.5">
+            <Clock size={18} className="text-slate-400" />
+            <h3 className="font-semibold text-slate-700 text-sm">Activity Timeline</h3>
+            <span className="text-[10px] text-slate-400 font-medium">({timeline.length} events)</span>
+          </div>
+          <span className={`text-slate-400 transition-transform duration-200 ${showTimeline ? 'rotate-180' : ''}`}>▼</span>
+        </button>
+        {showTimeline && (
+          <div className="px-5 pb-4 max-h-72 overflow-y-auto space-y-0">
+            {timeline.length === 0 ? (
+              <p className="text-sm text-slate-400 py-4 text-center">No activity recorded yet.</p>
+            ) : (
+              timeline.map((entry, idx) => {
+                const iconMap = { upload: '📤', approve: '✅', query: '⚠️', reupload: '🔄' };
+                const colorMap = { upload: 'text-blue-600 bg-blue-50', approve: 'text-emerald-600 bg-emerald-50', query: 'text-rose-600 bg-rose-50', reupload: 'text-amber-600 bg-amber-50' };
+                return (
+                  <div key={idx} className="flex items-start gap-3 py-2 border-b border-slate-50 last:border-0">
+                    <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs shrink-0 ${colorMap[entry.type]}`}>
+                      {iconMap[entry.type]}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm text-slate-700">
+                        <span className="font-medium">{entry.label}</span>
+                        {entry.docName && <span className="text-slate-500"> — {entry.docName}</span>}
+                      </p>
+                      <p className="text-[10px] text-slate-400 mt-0.5">{new Date(entry.date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</p>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        )}
+      </div>
 
       {/* Cleared! Form 01 Section */}
       {isCleared && (
@@ -587,9 +767,20 @@ export default function StudentDashboard({ onLogout }: StudentDashboardProps) {
                       const { error } = await uploadFileToStorage('documents', path, file);
                       if (error) { setToast('Upload failed'); return; }
                       const publicUrl = getPublicUrl('documents', path);
-                      await uploadDocument(studentId, docId, publicUrl);
-                      setDocuments(prev => prev.map(d => d.id === docId ? { ...d, status: 'pending' } : d));
+                      const { error: dbErr } = await uploadDocument(studentId, docId, publicUrl);
+                      if (dbErr) { setToast('Upload saved but DB error: ' + dbErr.message); return; }
+                      setDocuments(prev => prev.map(d => d.id === docId ? { ...d, status: 'pending', file_url: publicUrl } : d));
                       setToast(`Uploaded: ${documents.find(d => d.id === docId)?.name || 'Document'}`);
+                      const docName = documents.find(d => d.id === docId)?.name || 'Document';
+                      // Log activity
+                      if (userIdRef.current) await logActivity(userIdRef.current, `Uploaded ${docName}`, studentInfo.name || 'Unknown');
+                      // Notify all officers
+                      const { data: officers } = await supabase.from('profiles').select('id').eq('role', 'officer');
+                      if (officers) {
+                        for (const off of officers) {
+                          await createNotification(off.id, 'Document Uploaded', `${studentInfo.name} uploaded ${docName}.`, 'info');
+                        }
+                      }
                       e.target.value = '';
                     }}
                     className="hidden"
@@ -604,18 +795,35 @@ export default function StudentDashboard({ onLogout }: StudentDashboardProps) {
                     <div className="flex-1 flex items-center justify-center gap-1.5 py-2.5 bg-emerald-50 text-emerald-700 rounded-xl text-sm font-medium border border-emerald-200/50">
                       <CheckCircle size={16} /> Accepted
                     </div>
-                    <button onClick={() => { const url = fileUrls[doc.id]; if (url) window.open(url, '_blank'); else setToast('No file uploaded yet'); }} className="btn-ghost group" title="View document">
+                    <button onClick={() => { const url = fileUrls[doc.id] || doc.file_url; if (url) { setPreviewUrl(url); setPreviewName(doc.name); } else setToast('No file uploaded yet'); }} className="btn-ghost group" title="View document">
+                      <Eye size={18} className="transition-all duration-200 group-hover:scale-110" />
+                    </button>
+                  </div>
+                ) : doc.status === 'queried' ? (
+                  <div className="flex flex-col gap-2">
+                    <div className="flex gap-2">
+                      {(fileUrls[doc.id] || doc.file_url) && (
+                        <button onClick={() => { const url = fileUrls[doc.id] || doc.file_url; if (url) window.open(url, '_blank'); }} className="btn-ghost group" title="View document">
+                          <Eye size={18} className="transition-all duration-200 group-hover:scale-110" />
+                        </button>
+                      )}
+                      <button onClick={() => { uploadDocIdRef.current = doc.id; fileUploadRef.current?.click(); }} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-sm font-medium shadow-sm hover:shadow-md transition-all active:scale-[0.97]">
+                        <Upload size={16} /> Re-upload
+                      </button>
+                    </div>
+                  </div>
+                ) : (fileUrls[doc.id] || doc.file_url) ? (
+                  <div className="flex gap-2">
+                    <div className="flex-1 flex items-center justify-center gap-1.5 py-2.5 bg-blue-50 text-blue-700 rounded-xl text-sm font-medium border border-blue-200/50">
+                      <CheckCircle size={16} /> Submitted
+                    </div>
+                    <button onClick={() => { const url = fileUrls[doc.id] || doc.file_url; if (url) { setPreviewUrl(url); setPreviewName(doc.name); } else setToast('No file uploaded yet'); }} className="btn-ghost group" title="View document">
                       <Eye size={18} className="transition-all duration-200 group-hover:scale-110" />
                     </button>
                   </div>
                 ) : (
-                  <button onClick={() => { uploadDocIdRef.current = doc.id; fileUploadRef.current?.click(); }} className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium transition-all active:scale-[0.97] group/btn ${
-                    doc.status === 'queried'
-                      ? 'bg-rose-600 hover:bg-rose-700 text-white shadow-sm hover:shadow-md'
-                      : 'bg-primary-800 hover:bg-primary-900 text-white shadow-sm hover:shadow-md'
-                  }`}>
-                    <Upload size={16} className="transition-transform duration-300 group-hover/btn:rotate-12" />
-                    {doc.status === 'queried' ? 'Re-upload' : 'Upload'}
+                  <button onClick={() => { uploadDocIdRef.current = doc.id; fileUploadRef.current?.click(); }} className="w-full flex items-center justify-center gap-2 py-2.5 bg-primary-800 hover:bg-primary-900 text-white rounded-xl text-sm font-medium shadow-sm hover:shadow-md transition-all active:scale-[0.97] group/btn">
+                    <Upload size={16} className="transition-transform duration-300 group-hover/btn:rotate-12" /> Upload
                   </button>
                 )}
               </div>
@@ -689,7 +897,7 @@ export default function StudentDashboard({ onLogout }: StudentDashboardProps) {
                 const isRead = notifRead.includes(n.id);
                 return (
                   <div key={n.id} className={`px-5 py-3.5 border-b border-slate-50 last:border-0 transition-colors duration-150 hover:bg-slate-50 cursor-pointer ${!isRead ? 'bg-primary-50/40' : ''}`}
-                    onClick={() => { if (!isRead) setNotifRead([...notifRead, n.id]); }}
+                    onClick={() => { if (!isRead) { setNotifRead([...notifRead, n.id]); markNotifRead(n.id); } }}
                   >
                     <div className="flex items-start gap-3">
                       <div className={`w-2 h-2 rounded-full mt-1.5 shrink-0 ${!isRead ? 'bg-primary-500' : 'bg-transparent'}`} />
@@ -713,7 +921,30 @@ export default function StudentDashboard({ onLogout }: StudentDashboardProps) {
             </div>
             <div className="px-5 py-3 border-t border-slate-200 flex justify-between items-center shrink-0 bg-slate-50/50">
               <span className="text-[11px] text-slate-400">{studentNotifs.filter(n => !notifRead.includes(n.id)).length} unread</span>
-              <button onClick={() => setNotifRead(studentNotifs.map(n => n.id))} className="text-[11px] text-primary-600 hover:text-primary-700 font-medium">Mark all read</button>
+              <button onClick={() => { setNotifRead(studentNotifs.map(n => n.id)); markAllNotifRead(userIdRef.current!); }} className="text-[11px] text-primary-600 hover:text-primary-700 font-medium">Mark all read</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Document Preview Modal */}
+      {previewUrl && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={() => { setPreviewUrl(null); setPreviewName(''); }}>
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[85vh] flex flex-col overflow-hidden animate-scale-in" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 shrink-0">
+              <h3 className="font-semibold text-slate-800 text-sm truncate">{previewName}</h3>
+              <div className="flex items-center gap-2">
+                <a href={previewUrl} target="_blank" rel="noopener noreferrer" className="text-[11px] text-primary-600 hover:text-primary-700 font-medium">Open in new tab</a>
+                <button onClick={() => { setPreviewUrl(null); setPreviewName(''); }} className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg transition-all">✕</button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-auto bg-slate-100 flex items-center justify-center p-4">
+              {previewUrl.match(/\.(jpg|jpeg|png|gif|webp)/i) ? (
+                <img src={previewUrl} alt={previewName} className="max-w-full max-h-[70vh] object-contain rounded-xl shadow-lg" />
+              ) : (
+                <iframe src={previewUrl} className="w-full h-[70vh] rounded-xl border border-slate-200" title={previewName} />
+              )}
             </div>
           </div>
         </div>

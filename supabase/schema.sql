@@ -120,13 +120,24 @@ ALTER TABLE clearance_queue ENABLE ROW LEVEL SECURITY;
 ALTER TABLE activity_logs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE notifications ENABLE ROW LEVEL SECURITY;
 
+-- ACTIVITY LOGS RLS
+DROP POLICY IF EXISTS "Officers and HOD can view activity logs" ON activity_logs;
+CREATE POLICY "Officers and HOD can view activity logs"
+  ON activity_logs FOR SELECT USING (
+    (SELECT role FROM profiles WHERE id = auth.uid()) IN ('officer', 'hod')
+  );
+
+DROP POLICY IF EXISTS "Authenticated can insert activity logs" ON activity_logs;
+CREATE POLICY "Authenticated can insert activity logs"
+  ON activity_logs FOR INSERT WITH CHECK (auth.role() = 'authenticated');
+
 -- BASIC RLS POLICIES
 CREATE POLICY "Users can view own profile"
   ON profiles FOR SELECT USING (auth.uid() = id);
 
 CREATE POLICY "Officers and HOD can view all profiles"
   ON profiles FOR SELECT USING (
-    auth.jwt() -> 'user_metadata' ->> 'role' IN ('officer', 'hod')
+    (SELECT role FROM profiles WHERE id = auth.uid()) IN ('officer', 'hod')
   );
 
 CREATE POLICY "Students can view own record"
@@ -134,7 +145,7 @@ CREATE POLICY "Students can view own record"
 
 CREATE POLICY "Officers and HOD can view all students"
   ON students FOR SELECT USING (
-    auth.jwt() -> 'user_metadata' ->> 'role' IN ('officer', 'hod')
+    (SELECT role FROM profiles WHERE id = auth.uid()) IN ('officer', 'hod')
   );
 
 CREATE POLICY "Students can view own documents"
@@ -144,7 +155,39 @@ CREATE POLICY "Students can view own documents"
 
 CREATE POLICY "Officers and HOD can view all documents"
   ON student_documents FOR SELECT USING (
-    auth.jwt() -> 'user_metadata' ->> 'role' IN ('officer', 'hod')
+    (SELECT role FROM profiles WHERE id = auth.uid()) IN ('officer', 'hod')
+  );
+
+DROP POLICY IF EXISTS "Officers and HOD can update documents" ON student_documents;
+CREATE POLICY "Officers and HOD can update documents"
+  ON student_documents FOR UPDATE USING (
+    (SELECT role FROM profiles WHERE id = auth.uid()) IN ('officer', 'hod')
+  );
+
+DROP POLICY IF EXISTS "Officers and HOD can view queue" ON clearance_queue;
+CREATE POLICY "Officers and HOD can view queue"
+  ON clearance_queue FOR SELECT USING (
+    (SELECT role FROM profiles WHERE id = auth.uid()) IN ('officer', 'hod')
+  );
+
+DROP POLICY IF EXISTS "Officers and HOD can claim students" ON clearance_queue;
+CREATE POLICY "Officers and HOD can claim students"
+  ON clearance_queue FOR INSERT WITH CHECK (
+    (SELECT role FROM profiles WHERE id = auth.uid()) IN ('officer', 'hod')
+  );
+
+DROP POLICY IF EXISTS "Authenticated can insert notifications" ON notifications;
+CREATE POLICY "Authenticated can insert notifications"
+  ON notifications FOR INSERT WITH CHECK (auth.role() = 'authenticated');
+
+DROP POLICY IF EXISTS "Users can view own notifications" ON notifications;
+CREATE POLICY "Users can view own notifications"
+  ON notifications FOR SELECT USING (auth.uid() = user_id);
+
+DROP POLICY IF EXISTS "Officers and HOD can view all notifications" ON notifications;
+CREATE POLICY "Officers and HOD can view all notifications"
+  ON notifications FOR SELECT USING (
+    (SELECT role FROM profiles WHERE id = auth.uid()) IN ('officer', 'hod')
   );
 
 -- Function: look up a student's auth email by registration number
@@ -164,5 +207,112 @@ BEGIN
   WHERE s.reg_no = reg
   LIMIT 1;
   RETURN result;
+END;
+$$;
+
+-- Function: create a notification (bypasses stale schema cache via SECURITY DEFINER)
+CREATE OR REPLACE FUNCTION create_notification(
+  p_user_id UUID,
+  p_title TEXT,
+  p_message TEXT,
+  p_type TEXT DEFAULT 'info'
+)
+RETURNS UUID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  new_id UUID;
+BEGIN
+  INSERT INTO notifications (user_id, title, message, type, is_read)
+  VALUES (p_user_id, p_title, p_message, p_type, false)
+  RETURNING id INTO new_id;
+  RETURN new_id;
+END;
+$$;
+
+-- Functions: mark a notification as read
+CREATE OR REPLACE FUNCTION mark_notif_read(p_notif_id UUID)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  UPDATE notifications SET is_read = true WHERE id = p_notif_id;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION mark_all_notif_read(p_user_id UUID)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  UPDATE notifications SET is_read = true WHERE user_id = p_user_id;
+END;
+$$;
+
+-- Function: log an activity (bypasses RLS via SECURITY DEFINER)
+CREATE OR REPLACE FUNCTION log_activity(
+  p_officer_id UUID,
+  p_action TEXT,
+  p_target_student TEXT
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  INSERT INTO activity_logs (officer_id, action, target_student)
+  VALUES (p_officer_id, p_action, p_target_student);
+END;
+$$;
+
+-- Function: get recent activity logs (bypasses RLS via SECURITY DEFINER)
+CREATE OR REPLACE FUNCTION get_activity_logs(p_limit INT DEFAULT 50)
+RETURNS TABLE (
+  id UUID,
+  officer_id UUID,
+  action TEXT,
+  target_student TEXT,
+  created_at TIMESTAMPTZ
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  RETURN QUERY
+  SELECT a.id, a.officer_id, a.action, a.target_student, a.created_at
+  FROM activity_logs a
+  ORDER BY a.created_at DESC
+  LIMIT p_limit;
+END;
+$$;
+
+-- Function: get activity logs for a specific student (bypasses RLS)
+CREATE OR REPLACE FUNCTION get_student_activity_logs(p_student_name TEXT, p_limit INT DEFAULT 50)
+RETURNS TABLE (
+  id UUID,
+  officer_id UUID,
+  action TEXT,
+  target_student TEXT,
+  created_at TIMESTAMPTZ
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+BEGIN
+  RETURN QUERY
+  SELECT a.id, a.officer_id, a.action, a.target_student, a.created_at
+  FROM activity_logs a
+  WHERE a.target_student = p_student_name
+  ORDER BY a.created_at DESC
+  LIMIT p_limit;
 END;
 $$;

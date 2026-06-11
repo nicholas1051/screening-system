@@ -1,11 +1,11 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { jsPDF } from 'jspdf';
 import {
   Search, ChevronRight, FileText, Check, X, User, Download,
   LogOut, Clock, BarChart3, TrendingUp, AlertCircle, FileCheck, Bell, Maximize2, Minimize2, HelpCircle
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { getDocuments, getStudentDocuments, getNotifications, updateDocumentStatus, logActivity } from '../lib/db';
+import { getDocuments, getStudentDocuments, getNotifications, updateDocumentStatus, bulkApproveDocuments, logActivity, createNotification, updateStudentStatus } from '../lib/db';
 
 interface QueueItem {
   id: number;
@@ -15,7 +15,8 @@ interface QueueItem {
   type: string;
   course?: string;
   status: 'pending' | 'queried' | 'cleared';
-  score?: string;
+  claimed_by?: string;
+  claimed_name?: string;
 }
 
 interface OfficerDashboardProps {
@@ -42,6 +43,29 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
   const [activityLogEntries, setActivityLogEntries] = useState<{ action: string; time: string }[]>([]);
   const [docStatuses, setDocStatuses] = useState<string[]>([]);
   const [fileUrls, setFileUrls] = useState<Record<string, string>>({});
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [reviewNotes, setReviewNotes] = useState('');
+  const selectedIdRef = useRef<string | null>(null);
+  const prevSelectedIdRef = useRef<string | null>(null);
+
+  async function claimStudent(studentId: string) {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+    const { error } = await supabase.from('clearance_queue').insert({
+      officer_id: user.id, student_id: studentId,
+    });
+    if (!error) {
+      setQueue(prev => prev.map(s => s.student_id === studentId ? { ...s, claimed_by: user.id, claimed_name: user.user_metadata?.name || 'An officer' } : s));
+      setToast('Claimed student');
+    } else if (error.code === '23505') {
+      const { data: row } = await supabase.from('clearance_queue').select('officer_id').eq('student_id', studentId).maybeSingle();
+      if (row?.officer_id === user.id) {
+        setQueue(prev => prev.map(s => s.student_id === studentId ? { ...s, claimed_by: user.id, claimed_name: user.user_metadata?.name || 'An officer' } : s));
+      } else {
+        setToast('Already claimed by another officer');
+      }
+    }
+  }
 
   useEffect(() => {
     if (toast) { const t = setTimeout(() => setToast(null), 2500); return () => clearTimeout(t); }
@@ -57,40 +81,115 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
         .eq('student_id', selected.student_id)
         .in('document.name', [docList[idx]]);
       if (docRecords && docRecords.length > 0) {
-        await updateDocumentStatus(docRecords[0].id, newStatus, user.id);
+        const { error: updateErr } = await updateDocumentStatus(docRecords[0].id, newStatus, user.id, newStatus === 'issues' ? reviewNotes || undefined : undefined);
+        if (updateErr) { setToast('Update failed: ' + updateErr.message); return; }
         await logActivity(user.id, newStatus === 'verified' ? 'Approved' : newStatus === 'issues' ? 'Queried' : 'Marked Pending', selected.name);
+        // Notify the student
+        if (newStatus === 'verified' || newStatus === 'issues') {
+          const { data: student } = await supabase.from('students').select('user_id').eq('id', selected.student_id).single();
+          if (student?.user_id) {
+            const docName = docList[idx];
+            if (newStatus === 'verified') {
+              const { error: notifErr } = await createNotification(student.user_id, 'Document Approved', `${docName} has been approved.`, 'approval');
+              if (notifErr) console.error('Notification error:', notifErr.message, notifErr.code, notifErr.details);
+            } else {
+              const { error: notifErr } = await createNotification(student.user_id, 'Document Queried', `${docName} has been queried. ${reviewNotes ? reviewNotes : ''}`, 'query');
+              if (notifErr) console.error('Notification error:', notifErr.message, notifErr.code, notifErr.details);
+            }
+          }
+        }
+        // Notify all HODs
+        const { data: hods } = await supabase.from('profiles').select('id').eq('role', 'hod');
+        if (hods) {
+          const studentName = selected.name;
+          const docName = docList[idx];
+          const actionLabel = newStatus === 'verified' ? 'approved' : newStatus === 'issues' ? 'queried' : 'marked pending';
+          for (const hod of hods) {
+            await createNotification(hod.id, `Document ${actionLabel}`, `${docName} ${actionLabel} for ${studentName}.`, 'info');
+          }
+        }
+        // Update student-level status based on all document statuses
+        const currentStatuses = [...docStatuses]; currentStatuses[idx] = newStatus;
+        if (currentStatuses.every(s => s === 'verified')) {
+          await updateStudentStatus(selected.student_id, 'cleared');
+        } else if (currentStatuses.some(s => s === 'issues')) {
+          await updateStudentStatus(selected.student_id, 'queried');
+        } else {
+          await updateStudentStatus(selected.student_id, 'pending');
+        }
+        setReviewNotes('');
       }
     }
     setToast(`${newStatus === 'verified' ? 'Approved' : newStatus === 'issues' ? 'Queried' : 'Marked as pending'}: ${docList[idx]}`);
+  }
+
+  async function handleBulkApprove() {
+    const pendingCount = docStatuses.filter(s => s !== 'verified').length;
+    if (pendingCount === 0) { setToast('No pending documents to approve'); return; }
+    setToast(`Approving ${pendingCount} document${pendingCount > 1 ? 's' : ''}...`);
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user || !selected) return;
+    const { error } = await bulkApproveDocuments(selected.student_id, user.id);
+    if (error) { setToast('Bulk approve failed: ' + error.message); return; }
+    await logActivity(user.id, `Bulk Approved ${pendingCount} documents`, selected.name);
+    const { data: student } = await supabase.from('students').select('user_id').eq('id', selected.student_id).single();
+    if (student?.user_id) {
+      await createNotification(student.user_id, `${pendingCount} Documents Approved`, `${pendingCount} document${pendingCount > 1 ? 's have' : ' has'} been approved.`, 'milestone');
+    }
+    const { data: hods } = await supabase.from('profiles').select('id').eq('role', 'hod');
+    if (hods) {
+      for (const hod of hods) {
+        await createNotification(hod.id, `Bulk Approval`, `${pendingCount} documents approved for ${selected.name}.`, 'info');
+      }
+    }
+    setDocStatuses(docStatuses.map(s => s !== 'verified' ? 'verified' : s));
+    await updateStudentStatus(selected.student_id, 'cleared');
+    setToast(`Approved ${pendingCount} document${pendingCount > 1 ? 's' : ''}`);
   }
 
   useEffect(() => {
     async function loadData() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
+      setCurrentUserId(user.id);
 
-      // Load document types from Supabase
-      const { data: docs } = await getDocuments();
-      if (docs && docs.length > 0) {
-        setDocList(docs.map((d: any) => d.name));
-      }
-
-      // Load queue from Supabase
-      const { data: qItems } = await supabase
-        .from('clearance_queue')
-        .select('*, student:students(*)');
-      if (qItems && qItems.length > 0) {
-        const mapped = qItems.map((qi: any, i: number) => ({
-          id: i + 1,
-          student_id: qi.student?.id || qi.student_id || '',
-          name: qi.student?.name || 'Unknown',
-          reg: qi.student?.reg_no || 'N/A',
-          type: qi.student?.admission_type || 'UTME',
-          course: qi.student?.course || 'Computer Science',
-          status: qi.status === 'cleared' ? 'cleared' as const : qi.status === 'queried' ? 'queried' as const : 'pending' as const,
-        }));
+      // Load queue: all students with claim info (separate queries to avoid RLS join issues)
+      const [studentsRes, queueRes] = await Promise.all([
+        supabase.from('students').select('*').order('created_at'),
+        supabase.from('clearance_queue').select('*, officer:profiles(name)'),
+      ]);
+      const allStudents = studentsRes.data || [];
+      const queueRows = queueRes.data || [];
+      if (allStudents.length > 0) {
+        // Build a map of student_id -> claiming officer info
+        const claimMap: Record<string, { officer_id: string; officer_name: string }> = {};
+        for (const row of queueRows) {
+          if (row.student_id && !claimMap[row.student_id]) {
+            claimMap[row.student_id] = { officer_id: row.officer_id, officer_name: row.officer?.name || 'Unknown' };
+          }
+        }
+        const mapped = allStudents.map((s: any, i: number) => {
+          const claim = claimMap[s.id];
+          return {
+            id: i + 1,
+            student_id: s.id,
+            name: s.name,
+            reg: s.reg_no,
+            type: s.admission_type || 'UTME',
+            course: s.course,
+            status: (s.status === 'cleared' ? 'cleared' : s.status === 'queried' ? 'queried' : 'pending') as 'pending' | 'queried' | 'cleared',
+            claimed_by: claim?.officer_id || undefined,
+            claimed_name: claim?.officer_name || undefined,
+          };
+        });
         setQueue(mapped);
-        setSelected(mapped[0]);
+        if (selectedIdRef.current) {
+          const found = mapped.find(s => s.student_id === selectedIdRef.current);
+          if (found) { setSelected(found); } else { setSelected(mapped[0]); selectedIdRef.current = mapped[0]?.student_id || null; }
+        } else {
+          setSelected(mapped[0]);
+          selectedIdRef.current = mapped[0]?.student_id || null;
+        }
       }
 
       // Load notifications
@@ -107,10 +206,7 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
 
       // Load activity logs
       const { data: logs } = await supabase
-        .from('activity_logs')
-        .select('action, created_at')
-        .order('created_at', { ascending: false })
-        .limit(10);
+        .rpc('get_activity_logs', { p_limit: 50 });
       if (logs) {
         setActivityLogEntries(logs.map((l: any) => ({
           action: l.action,
@@ -120,6 +216,24 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
       setLoading(false);
     }
     loadData();
+    // Poll for status changes every 10 seconds
+    const interval = setInterval(loadData, 10000);
+    // Real-time subscription for new uploads
+    let channel: ReturnType<typeof supabase.channel>;
+    supabase.auth.getUser().then(({ data: { user: u } }) => {
+      if (!u) return;
+      channel = supabase
+        .channel('officer-activity-changes')
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'activity_logs' }, async (payload) => {
+          const entry = payload.new as any;
+          if (entry.action && entry.action.toLowerCase().includes('uploaded')) {
+            setToast(`${entry.action} — ${entry.target_student || 'A student'}`);
+            loadData();
+          }
+        })
+        .subscribe();
+    });
+    return () => { clearInterval(interval); if (channel) supabase.removeChannel(channel); };
   }, []);
 
   // Load document statuses when selected student changes
@@ -129,21 +243,38 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
       const { data: docs } = await getDocuments();
       if (!docs || docs.length === 0) return;
       const names = docs.map((d: any) => d.name);
-      setDocList(names);
-      setDocStatuses(Array(names.length).fill('pending'));
-      setActiveDoc(0);
-      const urls: Record<string, string> = {};
 
       const { data: studentDocs } = await getStudentDocuments(selected.student_id);
+      // Only show documents this student actually has assigned (UTME gets 14, DE gets 16)
+      const studentDocNames = new Set(studentDocs?.map((sd: any) => sd.document?.name) || []);
+      const filteredNames = studentDocNames.size > 0 ? names.filter(n => studentDocNames.has(n)) : names;
+      setDocList(filteredNames);
+      setDocStatuses(Array(filteredNames.length).fill('pending'));
+      if (prevSelectedIdRef.current !== selected.student_id) {
+        setActiveDoc(0);
+        prevSelectedIdRef.current = selected.student_id;
+      }
+      const urls: Record<string, string> = {};
+
+      // Also load the student's passport_url for the passport document
+      const { data: student } = await supabase.from('students').select('passport_url').eq('id', selected.student_id).single();
+
       if (studentDocs && studentDocs.length > 0) {
-        const statuses = Array(names.length).fill('pending');
+        const statuses = Array(filteredNames.length).fill('pending');
         studentDocs.forEach((sd: any) => {
-          const idx = names.indexOf(sd.document?.name);
+          const idx = filteredNames.indexOf(sd.document?.name);
           if (idx !== -1) {
             statuses[idx] = sd.status === 'verified' ? 'verified' : sd.status === 'issues' ? 'issues' : 'pending';
             if (sd.file_url) urls[sd.document?.name || idx] = sd.file_url;
           }
         });
+        // If passport has a separate passport_url but no file_url in student_documents, use it
+        if (student?.passport_url) {
+          const passportIdx = filteredNames.indexOf('Passport Photograph');
+          if (passportIdx !== -1 && !urls['Passport Photograph']) {
+            urls['Passport Photograph'] = student.passport_url;
+          }
+        }
         setDocStatuses(statuses);
         setFileUrls(urls);
       }
@@ -419,25 +550,38 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
             filtered.map((student) => (
               <div
                 key={student.id}
-                onClick={() => setSelected(student)}
+                onClick={async () => {
+                    if (student.claimed_by && student.claimed_by !== currentUserId) {
+                      setToast('Already claimed by ' + (student.claimed_name || 'another officer'));
+                      return;
+                    }
+                    if (!student.claimed_by) await claimStudent(student.student_id);
+                    selectedIdRef.current = student.student_id;
+                    setSelected(student);
+                  }}
                 className={`p-4 border-b border-slate-50 cursor-pointer transition-all duration-200 group ${
                   selected?.id === student.id
-                    ? 'bg-primary-50 border-l-4 border-l-primary-600 shadow-sm'
+                    ? 'bg-primary-50 border-l-4 border-l-primary-600 shadow-sm dark:bg-primary-900/40 dark:border-l-primary-400'
                     : 'hover:bg-slate-50 border-l-4 border-l-transparent hover:border-l-primary-300'
                 }`}
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <div className={`w-9 h-9 rounded-xl flex items-center justify-center text-sm font-bold transition-all duration-200 group-hover:scale-110 group-hover:shadow-sm ${
-                      student.status === 'cleared' ? 'bg-emerald-100 text-emerald-700' :
-                      student.status === 'queried' ? 'bg-rose-100 text-rose-700' :
-                      'bg-slate-100 text-slate-600'
+                      student.status === 'cleared' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300' :
+                      student.status === 'queried' ? 'bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300' :
+                      'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300'
                     }`}>
                       {student.name.charAt(0)}
                     </div>
                     <div>
-                      <h4 className="font-semibold text-slate-800 text-sm group-hover:text-primary-700 transition-colors duration-200">{student.name}</h4>
+                      <h4 className={`font-semibold text-sm transition-colors duration-200 ${selected?.id === student.id ? 'text-primary-900 dark:text-white' : 'text-slate-800 group-hover:text-primary-700'}`}>{student.name}</h4>
                       <p className="text-xs text-slate-400 mt-0.5">{student.reg} &bull; {student.type}</p>
+                      {student.claimed_name && (
+                        <span className="inline-block mt-1 text-[10px] bg-amber-50 text-amber-700 font-medium px-2 py-0.5 rounded-full border border-amber-200/50 dark:bg-amber-900/40 dark:text-amber-300 dark:border-amber-700/50">
+                          {student.claimed_by === currentUserId ? 'You' : student.claimed_name} is reviewing
+                        </span>
+                      )}
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
@@ -459,8 +603,8 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
       {/* Main Review Panel */}
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* Always-visible header bar */}
-        <div className="bg-white px-4 md:px-6 py-3 border-b border-slate-200 flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-2 md:gap-6">
+        <div className="bg-white px-4 md:px-6 py-3 border-b border-slate-200 flex items-center shrink-0">
+          <div className="flex items-center gap-2 md:gap-6 flex-1">
             <button onClick={() => setSidebarOpen(true)} className="md:hidden p-2 text-slate-400 hover:text-slate-600 rounded-xl hover:bg-slate-100 transition-colors" title="Open queue">
               <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
             </button>
@@ -470,7 +614,12 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
                   {selected.name.charAt(0)}
                 </div>
                 <div>
-                  <h2 className="text-xl font-bold text-slate-800">{selected.name}</h2>
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-xl font-bold text-slate-800">{selected.name}</h2>
+                    {docStatuses.length > 0 && docStatuses.every(s => s === 'verified') && (
+                      <span className="badge-success text-[10px]">All Approved</span>
+                    )}
+                  </div>
                   <div className="flex gap-4 text-sm text-slate-500 mt-0.5">
                     <span>Reg: <strong className="text-slate-700">{selected.reg}</strong></span>
                     <span>Type: <strong className="text-slate-700">{selected.type}</strong></span>
@@ -482,7 +631,7 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
               <p className="text-slate-400 text-sm">No student selected</p>
             )}
           </div>
-          <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
+          <div className="flex items-center gap-2 sm:gap-3">
             {selected && (
               <>
                 <button onClick={() => setShowAnalytics(true)} className="btn-primary flex items-center gap-1.5 text-xs py-2 px-3">
@@ -505,8 +654,8 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
               <HelpCircle size={16} />
               <span className="hidden lg:inline">Help</span>
             </button>
-            <button onClick={onLogout} className="flex items-center gap-2 text-sm text-slate-500 hover:text-rose-600 transition-colors font-medium p-2.5 lg:px-0" title="Exit">
-              <LogOut size={18} /> <span className="hidden lg:inline">Exit</span>
+            <button onClick={onLogout} className="flex items-center gap-2 text-sm text-slate-500 hover:text-rose-600 transition-colors font-medium p-2.5 lg:px-0" title="Log Out">
+              <LogOut size={18} /> <span className="hidden lg:inline">Log Out</span>
             </button>
           </div>
         </div>
@@ -525,17 +674,17 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
                       onClick={() => openViewer(idx)}
                       className={`w-full p-3 rounded-xl text-left transition-all duration-200 group/docs ${
                         activeDoc === idx
-                          ? 'bg-primary-50 border border-primary-200 shadow-sm ring-1 ring-primary-100'
-                          : 'bg-slate-50 border border-slate-200 hover:bg-slate-100 hover:border-slate-300'
+                          ? 'bg-primary-50 border border-primary-200 shadow-sm ring-1 ring-primary-100 dark:bg-primary-900/40 dark:border-primary-700 dark:ring-primary-800'
+                          : 'bg-slate-50 border border-slate-200 hover:bg-slate-100 hover:border-slate-300 dark:bg-slate-800 dark:border-slate-600 dark:hover:bg-slate-700 dark:hover:border-slate-500'
                       }`}
                     >
                       <div className="flex items-center gap-3">
                         <FileText size={18} className={`transition-all duration-200 group-hover/docs:scale-110 group-hover/docs:-rotate-6 ${
-                          activeDoc === idx ? 'text-primary-600' : 'text-slate-400 group-hover/docs:text-primary-500'
+                          activeDoc === idx ? 'text-primary-600 dark:text-primary-400' : 'text-slate-400 group-hover/docs:text-primary-500 dark:text-slate-500 dark:group-hover/docs:text-primary-400'
                         }`} />
                         <div className="flex-1 min-w-0">
-                          <p className={`text-sm font-medium transition-colors duration-200 ${activeDoc === idx ? 'text-primary-800' : 'text-slate-700 group-hover/docs:text-slate-800'}`}>{doc}</p>
-                          <p className={`text-[10px] mt-0.5 ${activeDoc === idx ? 'text-primary-500' : 'text-slate-400'}`}>
+                          <p className={`text-sm font-medium transition-colors duration-200 ${activeDoc === idx ? 'text-primary-800 dark:text-primary-200' : 'text-slate-700 group-hover/docs:text-slate-800 dark:text-slate-300 dark:group-hover/docs:text-white'}`}>{doc}</p>
+                          <p className={`text-[10px] mt-0.5 ${activeDoc === idx ? 'text-primary-500 dark:text-primary-400' : 'text-slate-400 dark:text-slate-500'}`}>
                             {docStatuses[idx] === 'verified' ? 'Approved' : docStatuses[idx] === 'issues' ? 'Queried' : 'Pending review'}
                           </p>
                         </div>
@@ -571,10 +720,18 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
                   <label className="block text-sm font-medium text-slate-700 mb-2">Review Notes</label>
                   <textarea
                     rows={3}
+                    value={reviewNotes}
+                    onChange={e => setReviewNotes(e.target.value)}
                     placeholder="Add verification notes or rejection reason..."
                     className="input-field resize-none text-sm"
                   />
                 </div>
+
+                {(() => { const pc = docStatuses.filter(s => s !== 'verified').length; return pc > 0 ? (
+                  <button onClick={handleBulkApprove} className="btn-success w-full flex items-center justify-center gap-2 mb-4 text-sm group/ba">
+                    <Check size={16} className="transition-transform duration-200 group-hover/ba:scale-125" /> Approve All ({pc} pending)
+                  </button>
+                ) : null; })()}
 
                 {/* Action Buttons */}
                 <div className="space-y-3">
@@ -615,10 +772,10 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
             {viewerOpen && (
               <div className={`fixed inset-0 z-50 flex items-center justify-center ${fullscreen ? '' : 'p-4'}`} onClick={() => { setViewerOpen(false); setFullscreen(false); }}>
                 <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
-                <div className={`relative bg-white shadow-2xl flex flex-col overflow-hidden animate-scale-in ${
+                  <div className={`relative bg-white shadow-2xl flex flex-col overflow-hidden animate-scale-in ${
                   fullscreen
                     ? 'w-full h-full rounded-none'
-                    : 'w-full max-w-4xl max-h-[85vh] rounded-2xl'
+                    : 'w-[70vw] max-w-5xl max-h-[85vh] rounded-2xl'
                 }`} onClick={e => e.stopPropagation()}>
                   <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 shrink-0">
                     <div>
@@ -626,6 +783,9 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
                       <p className="text-xs text-slate-400 mt-0.5">{selected.name} &bull; {selected.reg}</p>
                     </div>
                     <div className="flex items-center gap-2">
+                      {fileUrls[docList[activeDoc]] && (
+                        <a href={fileUrls[docList[activeDoc]]} target="_blank" rel="noopener noreferrer" className="text-[11px] text-primary-600 hover:text-primary-700 font-medium">Open in new tab</a>
+                      )}
                       <button onClick={() => setFullscreen(!fullscreen)} className="p-2.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-xl transition-all" title={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
                         {fullscreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
                       </button>
@@ -640,15 +800,7 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
                         /\.(jpg|jpeg|png|gif|webp)$/i.test(fileUrls[docList[activeDoc]]) ? (
                           <img src={fileUrls[docList[activeDoc]]} alt={docList[activeDoc]} className="max-w-full max-h-[60vh] object-contain rounded-xl" />
                         ) : (
-                          <div className="flex flex-col items-center gap-4">
-                            <div className="p-6 rounded-2xl bg-slate-50">
-                              <FileText size={96} className="text-slate-300" />
-                            </div>
-                            <p className="text-slate-500 font-medium">PDF Document</p>
-                            <button onClick={() => window.open(fileUrls[docList[activeDoc]], '_blank')} className="btn-primary text-sm px-4 py-2">
-                              <Download size={16} className="inline mr-1" /> Open PDF
-                            </button>
-                          </div>
+                          <iframe src={fileUrls[docList[activeDoc]]} className="w-full h-[60vh] rounded-xl border border-slate-200" title={docList[activeDoc]} />
                         )
                       ) : (
                         <>

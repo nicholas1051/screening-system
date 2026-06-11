@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { GraduationCap, ShieldCheck, BarChart3, Clock } from 'lucide-react';
+import { GraduationCap, ShieldCheck, BarChart3, Clock, Moon, Sun } from 'lucide-react';
 import { supabase } from './lib/supabase';
 import { getProfile, signOut } from './lib/db';
 import type { Profile } from './lib/db';
@@ -8,8 +8,9 @@ import TermsOfService from './components/TermsOfService';
 import StudentDashboard from './components/StudentDashboard';
 import OfficerDashboard from './components/OfficerDashboard';
 import HodDashboard from './components/HodDashboard';
+import ResetPasswordPage from './components/ResetPasswordPage';
 
-type Page = 'login' | 'dashboard' | 'terms';
+type Page = 'login' | 'dashboard' | 'terms' | 'reset-password';
 
 const roleConfig: Record<string, { label: string; icon: React.ElementType }> = {
   student: { label: 'Student', icon: GraduationCap },
@@ -22,6 +23,13 @@ export default function App() {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
   const [currentTime, setCurrentTime] = useState(new Date());
+  const [darkMode, setDarkMode] = useState(() => localStorage.getItem('darkMode') === 'true');
+
+  useEffect(() => {
+    if (darkMode) { document.documentElement.classList.add('dark'); }
+    else { document.documentElement.classList.remove('dark'); }
+    localStorage.setItem('darkMode', String(darkMode));
+  }, [darkMode]);
 
   useEffect(() => {
     const t = setInterval(() => setCurrentTime(new Date()), 60000);
@@ -31,11 +39,23 @@ export default function App() {
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session?.user) fetchProfile(session.user.id);
-      else setLoading(false);
+      else {
+        // Check if we landed here from a password recovery email
+        if (window.location.hash.includes('type=recovery')) {
+          setPage('reset-password');
+        }
+        setLoading(false);
+      }
     });
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (session?.user) fetchProfile(session.user.id);
-      else { setProfile(null); setPage('login'); setLoading(false); }
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'PASSWORD_RECOVERY') {
+        setPage('reset-password');
+        setLoading(false);
+      } else if (session?.user) {
+        fetchProfile(session.user.id);
+      } else {
+        setProfile(null); setPage('login'); setLoading(false);
+      }
     });
     return () => subscription.unsubscribe();
   }, []);
@@ -79,15 +99,19 @@ export default function App() {
     return <TermsOfService onBack={() => setPage('login')} />;
   }
 
+  if (page === 'reset-password') {
+    return <ResetPasswordPage onBackToLogin={() => setPage('login')} />;
+  }
+
   const config = roleConfig[profile?.role || 'student'];
 
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className="min-h-screen bg-slate-50 dark:bg-slate-900">
       <nav className="bg-primary-800 shadow-lg shadow-primary-200/30 sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 lg:px-8">
           <div className="flex items-center justify-between h-16">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full bg-white p-0.5 shadow-lg shadow-black/10 group shrink-0">
+              <div className="w-10 h-10 rounded-full bg-white logo-bg p-0.5 shadow-lg shadow-black/10 group shrink-0">
                 <img src="/uniabuja-logo.webp" alt="UniAbuja" className="w-full h-full rounded-full object-cover transition-transform duration-300 group-hover:scale-110" />
               </div>
               <div>
@@ -102,6 +126,9 @@ export default function App() {
                 <span className="text-emerald-300/40">|</span>
                 <span>{currentTime.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</span>
               </div>
+              <button onClick={() => setDarkMode(!darkMode)} className="p-2 text-emerald-200/80 hover:text-white rounded-lg transition-colors" title={darkMode ? 'Light mode' : 'Dark mode'}>
+                {darkMode ? <Sun size={16} /> : <Moon size={16} />}
+              </button>
               <div className="flex items-center gap-2 text-xs group">
                 <div className="w-8 h-8 rounded-xl bg-white/20 text-white flex items-center justify-center text-xs font-bold transition-all duration-300 group-hover:bg-white/30 group-hover:scale-110">
                   {config.label.charAt(0)}

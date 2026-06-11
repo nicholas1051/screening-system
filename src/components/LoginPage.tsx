@@ -102,7 +102,7 @@ export default function LoginPage({ onLogin, onTerms }: LoginPageProps) {
       <div className={`w-full max-w-5xl flex flex-col lg:flex-row items-center gap-8 lg:gap-16 transition-all duration-700 ${mounted ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-8'}`}>
         {/* Branding */}
         <div className="flex-1 text-center">
-          <div className="inline-flex items-center justify-center w-36 h-36 bg-white p-1.5 rounded-full mb-6 animate-fade-in shadow-lg shadow-white/10 ring-2 ring-white/20">
+          <div className="inline-flex items-center justify-center w-36 h-36 bg-white logo-bg p-1.5 rounded-full mb-6 animate-fade-in shadow-lg shadow-white/10 ring-2 ring-white/20">
             <img src="/uniabuja-logo.webp" alt="UniAbuja" className="w-full h-full rounded-full object-cover" />
           </div>
           <h1 className="text-5xl lg:text-6xl font-extrabold text-white leading-tight animate-fade-in-up tracking-tight">UniAbuja</h1>
