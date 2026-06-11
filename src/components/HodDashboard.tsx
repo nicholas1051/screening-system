@@ -135,7 +135,7 @@ export default function HodDashboard({ onLogout }: HodDashboardProps) {
           type: n.type,
           unread: !n.is_read,
         })));
-        setNotifRead(notifsRes.data.filter((n: any) => n.is_read).map((n: any) => n.id));
+        setNotifRead(prev => [...new Set([...prev, ...notifsRes.data.filter((n: any) => n.is_read).map((n: any) => n.id)])]);
       }
       if (officersRes.data && officersRes.data.length > 0) {
         setOfficers(officersRes.data.map((o: any) => ({

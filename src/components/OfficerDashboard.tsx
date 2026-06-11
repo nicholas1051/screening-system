@@ -5,7 +5,7 @@ import {
   LogOut, Clock, BarChart3, TrendingUp, AlertCircle, FileCheck, Bell, Maximize2, Minimize2, HelpCircle
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { getDocuments, getStudentDocuments, getNotifications, updateDocumentStatus, bulkApproveDocuments, logActivity, createNotification, updateStudentStatus } from '../lib/db';
+import { getDocuments, getStudentDocuments, getNotifications, updateDocumentStatus, bulkApproveDocuments, logActivity, createNotification, updateStudentStatus, markNotifRead, markAllNotifRead } from '../lib/db';
 
 interface QueueItem {
   id: number;
@@ -202,6 +202,7 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
           time: timeAgo(n.created_at),
           type: n.type,
         })));
+        setNotifRead(prev => [...new Set([...prev, ...notifs.filter((n: any) => n.is_read).map((n: any) => n.id)])]);
       }
 
       // Load activity logs
@@ -1001,7 +1002,7 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
                 const isRead = notifRead.includes(n.id);
                 return (
                   <div key={n.id} className={`px-5 py-3.5 border-b border-slate-50 last:border-0 transition-colors duration-150 hover:bg-slate-50 cursor-pointer ${!isRead ? 'bg-primary-50/40' : ''}`}
-                    onClick={() => { if (!isRead) setNotifRead([...notifRead, n.id]); }}
+                    onClick={() => { if (!isRead) { setNotifRead([...notifRead, n.id]); markNotifRead(n.id); } }}
                   >
                     <div className="flex items-start gap-3">
                       <div className={`w-2 h-2 rounded-full mt-1.5 shrink-0 ${!isRead ? 'bg-primary-500' : 'bg-transparent'}`} />
@@ -1025,7 +1026,7 @@ export default function OfficerDashboard({ onLogout }: OfficerDashboardProps) {
             </div>
             <div className="px-5 py-3 border-t border-slate-200 flex justify-between items-center shrink-0 bg-slate-50/50">
               <span className="text-[11px] text-slate-400">{officerNotifs.filter(n => !notifRead.includes(n.id)).length} unread</span>
-              <button onClick={() => setNotifRead(officerNotifs.map(n => n.id))} className="text-[11px] text-primary-600 hover:text-primary-700 font-medium">Mark all read</button>
+              <button onClick={() => { setNotifRead(officerNotifs.map(n => n.id)); if (currentUserId) markAllNotifRead(currentUserId); }} className="text-[11px] text-primary-600 hover:text-primary-700 font-medium">Mark all read</button>
             </div>
           </div>
         </div>
